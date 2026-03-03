@@ -41,7 +41,7 @@ import {
     MidiNoteOn, MidiCC,
     MoveShift, MoveMainKnob, MoveMainButton, MoveBack,
     MoveCapture, MoveRec, MoveSample, MoveUndo, MoveLoop, MoveCopy, MoveMute, MoveDelete,
-    MoveLeft, MoveRight,
+    MoveLeft, MoveRight, MoveDown, MoveUp,
     MovePads,
     MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4,
     White, Black, DarkGrey, LightGrey,
@@ -95,6 +95,8 @@ var CC_LOOP = MoveLoop;
 var CC_CAPTURE = MoveCapture;
 var CC_LEFT = MoveLeft;
 var CC_RIGHT = MoveRight;
+var CC_DOWN = MoveDown;
+var CC_UP = MoveUp;
 var CC_SAMPLE = MoveSample;
 
 /* Pad note range */
@@ -189,6 +191,12 @@ var sliceRegionStart = 0;
 var sliceRegionEnd = 0;
 var sliceMenuIndex = 0;
 var sliceMenuEditing = false;
+var slicePadOffset = 0;  /* pad bank offset (multiples of 32) */
+
+/* REX encoder detection */
+var REX_MODULE_PATH = "/data/UserData/move-anything/modules/sound_generators/rex";
+var REX_ENCODE_BIN = REX_MODULE_PATH + "/rex-encode";
+var REX_LOOPS_DIR = REX_MODULE_PATH + "/loops";
 
 /* Mode menu */
 var menuItems = ["Edit", "Loop", "Open File", "Exit Editor"];
@@ -217,10 +225,21 @@ var normalizeIndex = 0;
 
 /* Confirm save overlay */
 var saveItemsNormal = ["Overwrite", "Cancel"];
-var saveItemsSlice = ["Slices", "Drum Preset", "Cancel"];
 var saveItems = saveItemsNormal;
 var saveIndex = 0;
 var saveReturnView = VIEW_TRIM; /* View to return to after save/cancel */
+
+function isRexAvailable() {
+    return (typeof host_file_exists === "function") &&
+        host_file_exists(REX_MODULE_PATH + "/module.json");
+}
+
+function getSaveItemsSlice() {
+    if (isRexAvailable()) {
+        return ["Slices", "Drum Preset", "REX Loop", "Cancel"];
+    }
+    return ["Slices", "Drum Preset", "Cancel"];
+}
 
 /* Loop state */
 var loopEnabled = false;
@@ -746,8 +765,8 @@ function detectTransients(start, end, threshold) {
         }
     }
 
-    /* Cap at 32 slices max */
-    if (onsets.length > 31) onsets = onsets.slice(0, 31);
+    /* Cap at 128 slices max */
+    if (onsets.length > 127) onsets = onsets.slice(0, 127);
     return onsets;
 }
 
@@ -793,8 +812,9 @@ function updateSlicePadLeds() {
     if (ledInitPending) return;
     for (var i = 0; i < 32; i++) {
         var padNote = PAD_NOTE_MIN + i;
-        if (i < sliceCount) {
-            if (i === selectedSlice) {
+        var sliceIdx = slicePadOffset + i;
+        if (sliceIdx < sliceCount) {
+            if (sliceIdx === selectedSlice) {
                 setLED(padNote, White);
             } else {
                 setLED(padNote, PAD_COLOR_DIM);
@@ -1217,6 +1237,10 @@ function drawSliceView() {
             countLabel = "T:" + sliceThreshold;
         }
         var selLabel = (selectedSlice + 1) + "/" + sliceCount;
+        if (sliceCount > 32) {
+            var bankNum = Math.floor(slicePadOffset / 32) + 1;
+            selLabel += " P" + bankNum;
+        }
         var timeLabel = formatTime(startSample);
 
         /* Highlight the focused menu item with [brackets] */
@@ -1320,7 +1344,7 @@ function drawConfirmSave() {
     clear_screen();
 
     /* Title */
-    var title = (saveItems === saveItemsSlice) ? "Save slices as:" : "Overwrite file?";
+    var title = (saveReturnView === VIEW_SLICE) ? "Save slices as:" : "Overwrite file?";
     printCentered(2, title);
     drawDivider(12);
 
@@ -1375,6 +1399,7 @@ function switchView(view) {
         }
         sliceCount = 1;
         selectedSlice = 0;
+        slicePadOffset = 0;
         sliceMenuIndex = 0;
         sliceMenuEditing = false;
         recomputeSliceBoundaries();
@@ -1522,30 +1547,39 @@ function normalizeSelect() {
  * Handle confirm save selection.
  */
 function saveSelect() {
-    if (saveItems === saveItemsSlice) {
-        switch (saveIndex) {
-            case 0: /* Slices */
-                exportSlicedWavs();
-                switchView(saveReturnView);
-                break;
-            case 1: /* Drum Preset */
-                saveDrumRackPreset();
-                switchView(saveReturnView);
-                break;
-            case 2: /* Cancel */
-                switchView(saveReturnView);
-                break;
-        }
+    var selected = saveItems[saveIndex];
+    if (selected === "Slices") {
+        exportSlicedWavs();
+        returnToSaveView();
+    } else if (selected === "Drum Preset") {
+        saveDrumRackPreset();
+        returnToSaveView();
+    } else if (selected === "REX Loop") {
+        exportRexLoop();
+        returnToSaveView();
+    } else if (selected === "Overwrite") {
+        doSave();
+        returnToSaveView();
     } else {
-        switch (saveIndex) {
-            case 0: /* Overwrite */
-                doSave();
-                switchView(saveReturnView);
-                break;
-            case 1: /* Cancel */
-                switchView(saveReturnView);
-                break;
-        }
+        /* Cancel */
+        returnToSaveView();
+    }
+}
+
+/**
+ * Return to the view we came from before the save dialog.
+ * For slice mode, avoid switchView() which would reset slice state —
+ * just restore the view and refresh display.
+ */
+function returnToSaveView() {
+    if (saveReturnView === VIEW_SLICE) {
+        currentView = VIEW_SLICE;
+        selectSlice(selectedSlice);
+        syncMarkersToDs();
+        refreshWaveform();
+        updateSlicePadLeds();
+    } else {
+        switchView(saveReturnView);
     }
 }
 
@@ -1705,7 +1739,7 @@ function exportSlicedWavs() {
         return;
     }
 
-    var numSlices = Math.min(sliceCount, 16);
+    var numSlices = sliceCount;
     if (numSlices < 1) {
         showStatus("No slices", 60);
         return;
@@ -1759,6 +1793,74 @@ function exportSlicedWavs() {
         announce("Exported " + exported + " slices");
     } else {
         showStatus("Export failed", 60);
+    }
+}
+
+/**
+ * Export slices as a REX2 loop file via the rex-encode CLI tool.
+ * No slice count limit — REX supports arbitrary slices.
+ * Output: <REX_LOOPS_DIR>/<baseName>.rx2
+ */
+function exportRexLoop() {
+    if (!openedFilePath || !fileName || totalFrames <= 0) {
+        showStatus("No file", 60);
+        return;
+    }
+    if (typeof host_system_cmd !== "function") {
+        showStatus("No cmd API", 60);
+        return;
+    }
+    if (sliceCount < 1) {
+        showStatus("No slices", 60);
+        return;
+    }
+
+    /* First, export the full slice region as a WAV file for rex-encode input */
+    var savedStart = startSample;
+    var savedEnd = endSample;
+
+    startSample = sliceRegionStart;
+    endSample = sliceRegionEnd;
+    syncMarkersToDs();
+    host_module_get_param("dirty"); /* sync barrier */
+    host_module_set_param("export", "1");
+    host_module_get_param("copy_result");
+
+    /* Restore markers */
+    startSample = savedStart;
+    endSample = savedEnd;
+    syncMarkersToDs();
+
+    var baseName = fileName.replace(/\.wav$/i, "");
+    var sampleDir = openedFilePath.substring(0, openedFilePath.lastIndexOf("/"));
+    var editPath = sampleDir + "/" + baseName + "_edit.wav";
+    var rx2Path = REX_LOOPS_DIR + "/" + baseName + ".rx2";
+
+    /* Ensure loops directory exists */
+    if (typeof host_ensure_dir === "function") {
+        host_ensure_dir(REX_LOOPS_DIR);
+    }
+
+    /* Build boundaries string: sample positions relative to the exported region.
+     * The exported WAV starts at 0, so offset all boundaries by -sliceRegionStart. */
+    var parts = [];
+    for (var i = 0; i <= sliceCount; i++) {
+        parts.push("" + (sliceBoundaries[i] - sliceRegionStart));
+    }
+    var boundaries = parts.join(",");
+
+    /* Call rex-encode */
+    var cmd = 'sh -c "' + REX_ENCODE_BIN + ' \\"' + editPath + '\\" \\"' + rx2Path + '\\" \\"' + boundaries + '\\""';
+    var result = host_system_cmd(cmd);
+
+    /* Clean up temp WAV */
+    host_system_cmd('rm -f "' + editPath + '"');
+
+    if (result === 0) {
+        showStatus("REX saved", 90);
+        announce("REX loop saved");
+    } else {
+        showStatus("REX failed", 60);
     }
 }
 
@@ -2187,7 +2289,7 @@ function handleCC(cc, value) {
             saveReturnView = currentView;
             switchView(VIEW_CONFIRM_SAVE);
         } else if (currentView === VIEW_SLICE) {
-            saveItems = saveItemsSlice;
+            saveItems = getSaveItemsSlice();
             saveIndex = 0;
             saveReturnView = currentView;
             switchView(VIEW_CONFIRM_SAVE);
@@ -2249,9 +2351,30 @@ function handleCC(cc, value) {
             if (newIdx < 0) newIdx = sliceCount - 1;
             if (newIdx >= sliceCount) newIdx = 0;
             selectSlice(newIdx);
+            /* Auto-scroll pad bank if selected slice is outside visible range */
+            if (selectedSlice < slicePadOffset) {
+                slicePadOffset = Math.floor(selectedSlice / 32) * 32;
+            } else if (selectedSlice >= slicePadOffset + 32) {
+                slicePadOffset = Math.floor(selectedSlice / 32) * 32;
+            }
             syncMarkersToDs();
             updateSlicePadLeds();
             announce("Slice " + (selectedSlice + 1) + "/" + sliceCount);
+        }
+        return;
+    }
+
+    /* Up/Down arrows — pad bank scrolling in slice mode */
+    if ((cc === CC_UP || cc === CC_DOWN) && value > 0) {
+        if (currentView === VIEW_SLICE && sliceCount > 32) {
+            if (cc === CC_DOWN) {
+                slicePadOffset = Math.max(0, slicePadOffset - 32);
+            } else {
+                slicePadOffset = Math.min(Math.floor((sliceCount - 1) / 32) * 32, slicePadOffset + 32);
+            }
+            updateSlicePadLeds();
+            var bankNum = Math.floor(slicePadOffset / 32) + 1;
+            announce("Pad bank " + bankNum);
         }
         return;
     }
@@ -2328,7 +2451,7 @@ function handleCC(cc, value) {
                             /* Adjust slice count */
                             sliceCount += (delta > 0 ? 1 : -1);
                             if (sliceCount < 1) sliceCount = 1;
-                            if (sliceCount > 32) sliceCount = 32;
+                            if (sliceCount > 128) sliceCount = 128;
                             recomputeSliceBoundaries();
                             selectSlice(selectedSlice);
                             syncMarkersToDs();
@@ -2351,6 +2474,12 @@ function handleCC(cc, value) {
                         if (newIdx < 0) newIdx = sliceCount - 1;
                         if (newIdx >= sliceCount) newIdx = 0;
                         selectSlice(newIdx);
+                        /* Auto-scroll pad bank */
+                        if (selectedSlice < slicePadOffset) {
+                            slicePadOffset = Math.floor(selectedSlice / 32) * 32;
+                        } else if (selectedSlice >= slicePadOffset + 32) {
+                            slicePadOffset = Math.floor(selectedSlice / 32) * 32;
+                        }
                         syncMarkersToDs();
                         updateSlicePadLeds();
                         showJogStatus("Sel:" + (selectedSlice + 1) + "/" + sliceCount);
@@ -2624,9 +2753,10 @@ function handleNote(note, velocity) {
             }
         } else if (currentView === VIEW_SLICE) {
             var padIdx = note - PAD_NOTE_MIN;
-            if (padIdx < sliceCount) {
+            var sliceIdx = slicePadOffset + padIdx;
+            if (sliceIdx < sliceCount) {
                 if (velocity > 0) {
-                    selectSlice(padIdx);
+                    selectSlice(sliceIdx);
                     updateSlicePadLeds();
                     setLED(note, PAD_COLOR_PLAY);
                     activePadNote = note;
