@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install Waveform Editor module to Move
+# Install Wave Edit module to Move
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,7 +13,7 @@ if [ ! -d "dist/$MODULE_ID" ]; then
     exit 1
 fi
 
-echo "=== Installing Waveform Editor Module ==="
+echo "=== Installing Wave Edit Module ==="
 
 # Deploy to Move - tools subdirectory
 echo "Copying module to Move..."

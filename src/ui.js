@@ -1,5 +1,5 @@
 /*
- * Waveform Editor UI
+ * Wave Edit UI
  *
  * Trim, gain adjust, normalize, and edit audio files on the Move.
  * 128x64 1-bit monochrome display, QuickJS runtime.
@@ -20,7 +20,7 @@
  *   E2 (Knob 2)  - Move end marker
  *   E3 (Knob 3)  - Zoom in/out  |  Shift: vertical scale (1x-32x)
  *   E4 (Knob 4)  - Adjust gain  |  Shift: normalize (confirm overlay)
- *   Any pad      - Hold to audition, release to stop (shift = play whole file)
+ *   Any pad      - Hold to audition selection, release to stop
  *   Mute         - Mute (zero out) selection
  *   Copy         - Copy selection to clipboard
  *   Shift+Copy   - Paste clipboard at cursor (insert)
@@ -29,6 +29,8 @@
  *   Capture      - Save (overwrite confirmation)
  *   Undo         - Undo last destructive operation
  *   Loop         - Toggle loop mode
+ *   Left/Right   - Nudge selection by one coarse step
+ *   Shift+L/R    - Jump selection by one selection length
  *   Back         - Navigate back / exit
  */
 
@@ -38,7 +40,8 @@ import * as os from 'os';
 import {
     MidiNoteOn, MidiCC,
     MoveShift, MoveMainKnob, MoveMainButton, MoveBack,
-    MoveCapture, MoveUndo, MoveLoop, MoveCopy, MoveMute, MoveDelete,
+    MoveCapture, MoveRec, MoveSample, MoveUndo, MoveLoop, MoveCopy, MoveMute, MoveDelete,
+    MoveLeft, MoveRight,
     MovePads,
     MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4,
     White, Black, DarkGrey, LightGrey,
@@ -56,6 +59,13 @@ import {
     activateFilepathBrowserItem
 } from '/data/UserData/move-anything/shared/filepath_browser.mjs';
 
+import {
+    announce
+} from '/data/UserData/move-anything/shared/screen_reader.mjs';
+
+import { log as uniLog } from '/data/UserData/move-anything/shared/logger.mjs';
+function debugLog(msg) { uniLog("WaveEdit", msg); }
+
 /* ============ Constants ============ */
 
 /* Views */
@@ -66,6 +76,7 @@ var VIEW_CONFIRM_NORMALIZE = 5;
 var VIEW_LOOP = 6;
 var VIEW_CONFIRM_SAVE = 7;
 var VIEW_OPEN_FILE = 8;
+var VIEW_SLICE = 9;
 
 /* MIDI CCs — use shared constants */
 var CC_JOG = MoveMainKnob;
@@ -82,6 +93,9 @@ var CC_COPY = MoveCopy;
 var CC_UNDO = MoveUndo;
 var CC_LOOP = MoveLoop;
 var CC_CAPTURE = MoveCapture;
+var CC_LEFT = MoveLeft;
+var CC_RIGHT = MoveRight;
+var CC_SAMPLE = MoveSample;
 
 /* Pad note range */
 var PAD_NOTE_MIN = MovePads[0];
@@ -116,6 +130,7 @@ var shiftHeld = false;
 
 /* File info */
 var fileName = "";
+var openedFilePath = ""; /* Full path of currently loaded file */
 var fileDuration = 0;
 var totalFrames = 0;
 var sampleRate = 44100;
@@ -162,6 +177,19 @@ var cachedSeamHalf = -1;
 /* Loop view selected field: 0=start (loop point), 1=end */
 var loopSelectedField = 0;
 
+/* Slice state */
+var SLICE_MODE_EVEN = 0;
+var SLICE_MODE_AUTO = 1;
+var sliceMode = SLICE_MODE_EVEN;
+var sliceCount = 1;
+var sliceThreshold = 50;
+var sliceBoundaries = [];
+var selectedSlice = 0;
+var sliceRegionStart = 0;
+var sliceRegionEnd = 0;
+var sliceMenuIndex = 0;
+var sliceMenuEditing = false;
+
 /* Mode menu */
 var menuItems = ["Edit", "Loop", "Open File", "Exit Editor"];
 var menuIndex = 0;
@@ -188,7 +216,9 @@ var normalizeItems = ["Normalize", "Cancel"];
 var normalizeIndex = 0;
 
 /* Confirm save overlay */
-var saveItems = ["Overwrite", "Cancel"];
+var saveItemsNormal = ["Overwrite", "Cancel"];
+var saveItemsSlice = ["Drum Preset", "Cancel"];
+var saveItems = saveItemsNormal;
 var saveIndex = 0;
 var saveReturnView = VIEW_TRIM; /* View to return to after save/cancel */
 
@@ -346,6 +376,7 @@ function formatSelDuration() {
 function showStatus(msg, frames) {
     statusMsg = msg;
     statusTimer = frames || 60;
+    announce(msg);
 }
 
 /**
@@ -357,6 +388,7 @@ function showKnobStatus(knobIndex, msg) {
     knobStatusMsg[knobIndex] = msg;
     /* Push this knob to most-recent in touch order */
     pushTouchOrder(knobIndex);
+    announce(msg);
 }
 
 /**
@@ -367,6 +399,7 @@ function showJogStatus(msg) {
     jogStatusMsg = msg;
     jogHeldTimer = JOG_HOLD_FRAMES;
     pushTouchOrder(JOG_ID);
+    announce(msg);
 }
 
 /**
@@ -638,6 +671,138 @@ function refreshSeamWaveform() {
 function invalidateSeamWaveform() {
     seamWaveformDirty = true;
     refreshSeamWaveform();
+}
+
+/* ============ Slice Helpers ============ */
+
+/**
+ * Parse raw waveform JSON string into array of [min, max] pairs.
+ */
+function parseWaveformData(raw) {
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Recompute slice boundaries based on current mode.
+ */
+function recomputeSliceBoundaries() {
+    if (sliceMode === SLICE_MODE_EVEN) {
+        var regionLen = sliceRegionEnd - sliceRegionStart;
+        sliceBoundaries = [];
+        for (var i = 0; i <= sliceCount; i++) {
+            sliceBoundaries.push(sliceRegionStart + Math.round((regionLen * i) / sliceCount));
+        }
+    } else {
+        /* Auto: transient detection */
+        var onsets = detectTransients(sliceRegionStart, sliceRegionEnd, sliceThreshold);
+        sliceBoundaries = [sliceRegionStart];
+        for (var j = 0; j < onsets.length; j++) {
+            sliceBoundaries.push(onsets[j]);
+        }
+        sliceBoundaries.push(sliceRegionEnd);
+        sliceCount = sliceBoundaries.length - 1;
+        if (sliceCount < 1) sliceCount = 1;
+    }
+    /* Clamp selected slice */
+    if (selectedSlice >= sliceCount) selectedSlice = sliceCount - 1;
+    if (selectedSlice < 0) selectedSlice = 0;
+}
+
+/**
+ * Detect transients in waveform data using amplitude jumps.
+ * Returns array of sample positions where onsets occur.
+ */
+function detectTransients(start, end, threshold) {
+    var raw = host_module_get_param("waveform:" + start + "," + end);
+    var data = parseWaveformData(raw);
+    if (!data || data.length < 2) return [];
+
+    var regionLen = end - start;
+    var samplesPerBin = regionLen / data.length;
+    var onsets = [];
+    var thresh = threshold / 100.0;
+
+    /* Compute per-bin amplitude */
+    var amps = [];
+    for (var i = 0; i < data.length; i++) {
+        var amp = Math.max(Math.abs(data[i][0]), Math.abs(data[i][1]));
+        amps.push(amp);
+    }
+
+    /* Detect amplitude jumps exceeding threshold */
+    for (var i = 1; i < amps.length; i++) {
+        var jump = amps[i] - amps[i - 1];
+        if (jump > thresh) {
+            var pos = start + Math.round(i * samplesPerBin);
+            /* Minimum distance from previous onset: 4 bins */
+            if (onsets.length === 0 || (pos - onsets[onsets.length - 1]) > samplesPerBin * 4) {
+                onsets.push(pos);
+            }
+        }
+    }
+
+    /* Cap at 32 slices max */
+    if (onsets.length > 31) onsets = onsets.slice(0, 31);
+    return onsets;
+}
+
+/**
+ * Select a slice by index. Updates start/end markers and syncs to DSP.
+ */
+function selectSlice(idx) {
+    if (idx < 0 || idx >= sliceCount) return;
+    selectedSlice = idx;
+    startSample = sliceBoundaries[idx];
+    endSample = sliceBoundaries[idx + 1];
+
+    /* Auto-scroll: position slice start at 10% from left edge,
+     * slice end at 90% — matching trim mode's margin style.
+     * If the slice is wider than 80% of the view, prioritize start at 10%. */
+    if (zoomLevel > 0) {
+        var vStart = getVisibleStart();
+        var vEnd = getVisibleEnd();
+        var vRange = vEnd - vStart;
+        var margin = Math.floor(vRange * 0.10);
+        var sliceLen = endSample - startSample;
+
+        if (startSample < vStart + margin || endSample > vEnd - margin) {
+            if (sliceLen <= vRange - 2 * margin) {
+                /* Slice fits within 10%-90% — place start at 10% */
+                zoomCenter = startSample - margin + Math.floor(vRange / 2);
+            } else {
+                /* Slice wider than 80% of view — prioritize start at 10% */
+                zoomCenter = startSample - margin + Math.floor(vRange / 2);
+            }
+            if (zoomCenter < 0) zoomCenter = 0;
+            if (zoomCenter > totalFrames) zoomCenter = totalFrames;
+        }
+    }
+
+    waveformDirty = true;
+}
+
+/**
+ * Update pad LEDs for slice mode.
+ */
+function updateSlicePadLeds() {
+    if (ledInitPending) return;
+    for (var i = 0; i < 32; i++) {
+        var padNote = PAD_NOTE_MIN + i;
+        if (i < sliceCount) {
+            if (i === selectedSlice) {
+                setLED(padNote, White);
+            } else {
+                setLED(padNote, PAD_COLOR_DIM);
+            }
+        } else {
+            setLED(padNote, Black);
+        }
+    }
 }
 
 /**
@@ -979,6 +1144,92 @@ function drawLoopView() {
     }
 }
 
+/* ============ Drawing: Slice View ============ */
+
+/**
+ * Draw slice boundary lines on the waveform (dashed, every 3rd pixel).
+ * Draws all boundaries. The outer edges (region start/end) are drawn
+ * only when they don't belong to the currently selected slice (which
+ * already has start/end markers from the normal marker drawing).
+ */
+function drawSliceBoundaryLines() {
+    var vStart = getVisibleStart();
+    var vEnd = getVisibleEnd();
+    var vRange = vEnd - vStart;
+    if (vRange <= 0) return;
+
+    for (var i = 0; i < sliceBoundaries.length; i++) {
+        /* Skip boundaries that are the selected slice's start/end —
+         * those are already shown by the normal start/end markers. */
+        if (i === selectedSlice || i === selectedSlice + 1) continue;
+
+        var bx = Math.floor(((sliceBoundaries[i] - vStart) / vRange) * SCREEN_W);
+        if (bx >= 0 && bx < SCREEN_W) {
+            for (var y = WAVE_Y_TOP; y < WAVE_Y_BOT; y += 3) {
+                set_pixel(bx, y, 1);
+            }
+        }
+    }
+}
+
+/**
+ * Draw the Slice mode view.
+ */
+function drawSliceView() {
+    refreshWaveform();
+    clear_screen();
+
+    /* Header: SLICE*L  filename.wav  1.2s */
+    var modeStr = buildModeHeader("SLICE");
+    print(0, 0, modeStr, 1);
+    var nameX = (modeStr.length + 1) * 6;
+    var maxNameChars = Math.floor((SCREEN_W - nameX - 36) / 6);
+    if (maxNameChars < 4) maxNameChars = 4;
+    var dispName = truncate(fileName, maxNameChars);
+    print(nameX, 0, dispName, 1);
+    var durStr = fileDuration > 0 ? fileDuration.toFixed(1) + "s" : "";
+    var durX = SCREEN_W - durStr.length * 6;
+    print(durX, 0, durStr, 1);
+
+    /* Top divider */
+    drawDivider(10);
+
+    /* Waveform area — show the whole sliced region */
+    drawWaveform();
+
+    /* Overlay slice boundary lines */
+    drawSliceBoundaryLines();
+
+    /* Bottom divider */
+    drawDivider(WAVE_Y_BOT + 1);
+
+    /* Footer: active status or slice info */
+    var footerStatus = getActiveStatus();
+    if (footerStatus !== "") {
+        printCentered(54, footerStatus);
+    } else {
+        /* Build footer items based on slice menu */
+        var modeLabel = sliceMode === SLICE_MODE_EVEN ? "Even" : "Auto";
+        var countLabel;
+        if (sliceMode === SLICE_MODE_EVEN) {
+            countLabel = "" + sliceCount;
+        } else {
+            countLabel = "T:" + sliceThreshold;
+        }
+        var selLabel = (selectedSlice + 1) + "/" + sliceCount;
+        var timeLabel = formatTime(startSample);
+
+        /* Highlight the focused menu item with [brackets] */
+        var parts = [];
+        parts.push(sliceMenuIndex === 0 ? "[" + modeLabel + "]" : modeLabel);
+        parts.push(sliceMenuIndex === 1 ? "[" + countLabel + "]" : countLabel);
+        parts.push(sliceMenuIndex === 2 ? "[" + selLabel + "]" : selLabel);
+
+        var footer = parts.join(" ") + " " + timeLabel;
+        print(0, 54, footer, 1);
+    }
+}
+
 /* ============ Drawing: Mode Menu ============ */
 
 function drawModeMenu() {
@@ -1069,7 +1320,8 @@ function drawConfirmSave() {
     clear_screen();
 
     /* Title */
-    printCentered(2, "Overwrite file?");
+    var title = (saveItems === saveItemsSlice) ? "Save slices as:" : "Overwrite file?";
+    printCentered(2, title);
     drawDivider(12);
 
     /* Info: show filename */
@@ -1102,6 +1354,7 @@ function switchView(view) {
         refreshState();
         refreshWaveform();
         updateLeds();
+        announce("Edit, " + fileName);
     } else if (view === VIEW_LOOP) {
         /* Auto-enable loop when entering loop mode */
         if (!loopEnabled) {
@@ -1111,6 +1364,34 @@ function switchView(view) {
         refreshState();
         invalidateSeamWaveform();
         updateLeds();
+        announce("Loop, " + fileName);
+    } else if (view === VIEW_SLICE) {
+        /* Capture current selection as slice region */
+        sliceRegionStart = startSample;
+        sliceRegionEnd = endSample;
+        if (sliceRegionEnd <= sliceRegionStart) {
+            sliceRegionEnd = totalFrames;
+            sliceRegionStart = 0;
+        }
+        sliceCount = 1;
+        selectedSlice = 0;
+        sliceMenuIndex = 0;
+        sliceMenuEditing = false;
+        recomputeSliceBoundaries();
+        selectSlice(0);
+        syncMarkersToDs();
+        refreshState();
+        refreshWaveform();
+        updateSlicePadLeds();
+        announce("Slice, " + fileName);
+    } else if (view === VIEW_MODE_MENU) {
+        announce("Menu, " + menuItems[menuIndex]);
+    } else if (view === VIEW_CONFIRM_EXIT) {
+        announce("Unsaved changes, " + confirmItems[confirmIndex]);
+    } else if (view === VIEW_CONFIRM_NORMALIZE) {
+        announce("Normalize? " + normalizeItems[normalizeIndex]);
+    } else if (view === VIEW_CONFIRM_SAVE) {
+        announce("Overwrite? " + saveItems[saveIndex]);
     }
 }
 
@@ -1142,6 +1423,11 @@ function enterOpenFileBrowser() {
     );
     refreshFilepathBrowser(openFileBrowserState, OPEN_FILE_FS);
     currentView = VIEW_OPEN_FILE;
+    var dir = openFileBrowserState.currentDir || "";
+    var dirName = dir.substring(dir.lastIndexOf("/") + 1) || "Samples";
+    var first = (openFileBrowserState.items && openFileBrowserState.items.length > 0)
+        ? openFileBrowserState.items[0].label : "empty";
+    announce("Open File, " + dirName + ", " + first);
 }
 
 function drawOpenFileBrowser() {
@@ -1236,14 +1522,28 @@ function normalizeSelect() {
  * Handle confirm save selection.
  */
 function saveSelect() {
-    switch (saveIndex) {
-        case 0: /* Overwrite */
-            doSave();
-            switchView(saveReturnView);
-            break;
-        case 1: /* Cancel */
-            switchView(saveReturnView);
-            break;
+    debugLog("SAVE_SELECT: items=" + (saveItems === saveItemsSlice ? "slice" : "normal") + " idx=" + saveIndex);
+    if (saveItems === saveItemsSlice) {
+        switch (saveIndex) {
+            case 0: /* Drum Preset */
+                debugLog("SAVE_SELECT: calling saveDrumRackPreset");
+                saveDrumRackPreset();
+                switchView(saveReturnView);
+                break;
+            case 1: /* Cancel */
+                switchView(saveReturnView);
+                break;
+        }
+    } else {
+        switch (saveIndex) {
+            case 0: /* Overwrite */
+                doSave();
+                switchView(saveReturnView);
+                break;
+            case 1: /* Cancel */
+                switchView(saveReturnView);
+                break;
+        }
     }
 }
 
@@ -1289,7 +1589,7 @@ function exitEditor() {
  * fire-and-forget race with encoder param updates.
  */
 function startPlayback() {
-    pendingPlay = shiftHeld ? "whole" : "selection";
+    pendingPlay = "selection";
     playing = true;
 }
 
@@ -1389,6 +1689,223 @@ function doExport() {
 }
 
 /**
+ * Build a default drumCell parameter block for a slice.
+ */
+function buildDrumCellParams(playbackStart, playbackLength) {
+    return {
+        "Effect_EightBitFilterDecay": 5.0,
+        "Effect_EightBitResamplingRate": 14080.0,
+        "Effect_FmAmount": 0.0,
+        "Effect_FmFrequency": 1000.0,
+        "Effect_LoopLength": 0.30000001192092896,
+        "Effect_LoopOffset": 0.019999999552965164,
+        "Effect_NoiseAmount": 0.0,
+        "Effect_NoiseFrequency": 10000.0,
+        "Effect_On": true,
+        "Effect_PitchEnvelopeAmount": 0.0,
+        "Effect_PitchEnvelopeDecay": 0.30000001192092896,
+        "Effect_PunchAmount": 0.0,
+        "Effect_PunchTime": 0.12015999853610992,
+        "Effect_RingModAmount": 0.0,
+        "Effect_RingModFrequency": 1000.0,
+        "Effect_StretchFactor": 1.0,
+        "Effect_StretchGrainSize": 0.10000000149011612,
+        "Effect_SubOscAmount": 0.0,
+        "Effect_SubOscFrequency": 60.0,
+        "Effect_Type": "Stretch",
+        "Enabled": true,
+        "NotePitchBend": true,
+        "Pan": 0.0,
+        "Voice_Detune": 0.0,
+        "Voice_Envelope_Attack": 0.00009999999747378752,
+        "Voice_Envelope_Decay": 0.0010000000474974513,
+        "Voice_Envelope_Hold": 60.0,
+        "Voice_Envelope_Mode": "A-H-D",
+        "Voice_Filter_Frequency": 22000.0,
+        "Voice_Filter_On": true,
+        "Voice_Filter_PeakGain": 1.0,
+        "Voice_Filter_Resonance": 0.0,
+        "Voice_Filter_Type": "Lowpass",
+        "Voice_Gain": 1.0,
+        "Voice_ModulationAmount": 0.0,
+        "Voice_ModulationSource": "Velocity",
+        "Voice_ModulationTarget": "Filter",
+        "Voice_PitchToEnvelopeModulation": true,
+        "Voice_PlaybackLength": playbackLength,
+        "Voice_PlaybackStart": playbackStart,
+        "Voice_Transpose": 0,
+        "Voice_VelocityToVolume": 0.5,
+        "Volume": -12.0
+    };
+}
+
+/**
+ * Save current slices as an Ableton Move drum rack preset (.ablpreset).
+ * Up to 16 slices, each mapped to a pad (MIDI notes 36-51).
+ */
+function saveDrumRackPreset() {
+    debugLog("DRUM_SAVE: start fileName=" + fileName + " frames=" + totalFrames + " path=" + openedFilePath);
+    if (!fileName || totalFrames <= 0) {
+        showStatus("No file", 60);
+        return;
+    }
+
+    /* Build sample URI from the file path used to open the file.
+     * openFilePath is set when a file is loaded via the browser. */
+    var sampleUri;
+    if (openedFilePath) {
+        var userLibPrefix = "/data/UserData/UserLibrary/";
+        if (openedFilePath.indexOf(userLibPrefix) === 0) {
+            sampleUri = "ableton:/user-library/" + openedFilePath.substring(userLibPrefix.length);
+        } else {
+            sampleUri = "ableton:/user-library/Samples/" + fileName;
+        }
+    } else {
+        /* Fallback: assume file is in Samples */
+        sampleUri = "ableton:/user-library/Samples/" + fileName;
+    }
+
+    var numSlices = Math.min(sliceCount, 16);
+
+    /* Build drum rack chains — one per slice */
+    var drumChains = [];
+    for (var i = 0; i < numSlices; i++) {
+        var sliceStart = sliceBoundaries[i] / totalFrames;
+        var sliceLen = (sliceBoundaries[i + 1] - sliceBoundaries[i]) / totalFrames;
+
+        drumChains.push({
+            "name": "",
+            "color": 0,
+            "devices": [{
+                "presetUri": null,
+                "kind": "drumCell",
+                "name": "",
+                "parameters": buildDrumCellParams(sliceStart, sliceLen),
+                "deviceData": {
+                    "sampleUri": sampleUri
+                }
+            }],
+            "mixer": {
+                "pan": 0.0,
+                "solo-cue": false,
+                "speakerOn": true,
+                "volume": 0.0,
+                "sends": [{ "isEnabled": true, "amount": -70.0 }]
+            },
+            "drumZoneSettings": {
+                "receivingNote": 36 + i,
+                "sendingNote": 60,
+                "chokeGroup": 1
+            }
+        });
+    }
+
+    /* Build the preset name from the filename */
+    var baseName = fileName.replace(/\.wav$/i, "");
+    var presetName = baseName + " Kit";
+
+    var preset = {
+        "$schema": "http://tech.ableton.com/schema/song/1.8.2/devicePreset.json",
+        "kind": "instrumentRack",
+        "name": presetName,
+        "parameters": {
+            "Enabled": true,
+            "Macro0": 0.0, "Macro1": 0.0, "Macro2": 0.0, "Macro3": 0.0,
+            "Macro4": 0.0, "Macro5": 0.0, "Macro6": 0.0, "Macro7": 0.0
+        },
+        "chains": [{
+            "name": "",
+            "color": 0,
+            "devices": [{
+                "presetUri": null,
+                "kind": "drumRack",
+                "name": presetName,
+                "parameters": {
+                    "Enabled": true,
+                    "Macro0": 0.0, "Macro1": 0.0, "Macro2": 0.0, "Macro3": 0.0,
+                    "Macro4": 0.0, "Macro5": 0.0, "Macro6": 0.0, "Macro7": 0.0
+                },
+                "chains": drumChains,
+                "returnChains": [{
+                    "name": "",
+                    "color": 0,
+                    "devices": [{
+                        "presetUri": null,
+                        "kind": "reverb",
+                        "name": "",
+                        "parameters": {
+                            "AllPassGain": 0.9219444394111633,
+                            "AllPassSize": 0.7699999809265137,
+                            "BandFreq": 402.4820251464844,
+                            "BandHighOn": true,
+                            "BandLowOn": true,
+                            "BandWidth": 4.572916507720947,
+                            "ChorusOn": false,
+                            "CutOn": false,
+                            "DecayTime": 3542.771728515625,
+                            "DiffuseDelay": 0.2142857164144516,
+                            "EarlyReflectModDepth": 3.2428934574127197,
+                            "EarlyReflectModFreq": 0.1093868613243103,
+                            "Enabled": true,
+                            "FlatOn": false,
+                            "FreezeOn": false,
+                            "HighFilterType": "Shelf",
+                            "MixDiffuse": 1.995300054550171,
+                            "MixDirect": 1.0,
+                            "MixReflect": 1.792531132698059,
+                            "PreDelay": 7.023662090301514,
+                            "RoomSize": 67.26939392089844,
+                            "RoomType": "SuperEco",
+                            "ShelfHiFreq": 1469.94873046875,
+                            "ShelfHiGain": 0.8833333849906921,
+                            "ShelfHighOn": true,
+                            "ShelfLoFreq": 670.7686157226563,
+                            "ShelfLoGain": 0.6166667342185974,
+                            "ShelfLowOn": true,
+                            "SizeModDepth": 0.15581557154655457,
+                            "SizeModFreq": 2.3727688789367676,
+                            "SizeSmoothing": "Fast",
+                            "SpinOn": true,
+                            "StereoSeparation": 107.62000274658203
+                        },
+                        "deviceData": {}
+                    }],
+                    "mixer": {
+                        "pan": 0.0,
+                        "solo-cue": false,
+                        "speakerOn": true,
+                        "volume": 0.0,
+                        "sends": [{ "isEnabled": false, "amount": -70.0 }]
+                    }
+                }]
+            }],
+            "mixer": {
+                "pan": 0.0,
+                "solo-cue": false,
+                "speakerOn": true,
+                "volume": 0.0,
+                "sends": []
+            }
+        }]
+    };
+
+    var presetJson = JSON.stringify(preset, null, 2);
+    var presetDir = "/data/UserData/UserLibrary/Track Presets";
+    var presetPath = presetDir + "/" + presetName + ".ablpreset";
+
+    if (typeof host_write_file !== "function") {
+        showStatus("No write API", 60);
+        return;
+    }
+    if (typeof host_ensure_dir === "function") {
+        host_ensure_dir(presetDir);
+    }
+    host_write_file(presetPath, presetJson);
+    showStatus("Kit saved!", 90);
+    announce("Saved " + presetName);
+}
+
+/**
  * Undo last destructive operation.
  */
 function doUndo() {
@@ -1449,13 +1966,20 @@ function handleCC(cc, value) {
         switch (currentView) {
             case VIEW_TRIM:
             case VIEW_LOOP:
-                switchView(VIEW_MODE_MENU);
+                attemptExit();
+                break;
+            case VIEW_SLICE:
+                /* Restore selection spanning all slices */
+                startSample = sliceBoundaries[0];
+                endSample = sliceBoundaries[sliceCount];
+                syncMarkersToDs();
+                switchView(VIEW_TRIM);
                 break;
             case VIEW_MODE_MENU:
                 attemptExit();
                 break;
             case VIEW_CONFIRM_EXIT:
-                switchView(VIEW_MODE_MENU);
+                switchView(VIEW_TRIM);
                 break;
             case VIEW_CONFIRM_NORMALIZE:
                 switchView(VIEW_TRIM);
@@ -1479,9 +2003,15 @@ function handleCC(cc, value) {
                     openFileBrowserState.selectedIndex = 0;
                     openFileBrowserState.selectedPath = "";
                     refreshFilepathBrowser(openFileBrowserState, OPEN_FILE_FS);
+                    var bDir = openFileBrowserState.currentDir || "";
+                    var bDirName = bDir.substring(bDir.lastIndexOf("/") + 1) || "Samples";
+                    var bFirst = (openFileBrowserState.items && openFileBrowserState.items.length > 0)
+                        ? openFileBrowserState.items[0].label : "empty";
+                    announce(bDirName + ", " + bFirst);
                 } else {
                     openFileBrowserState = null;
                     currentView = VIEW_MODE_MENU;
+                    announce("Menu, " + menuItems[menuIndex]);
                 }
                 break;
         }
@@ -1555,16 +2085,100 @@ function handleCC(cc, value) {
         return;
     }
 
-    /* Capture button — normal: save with confirmation, shift: export to file */
+    /* Capture button — toggle between Trim and Slice mode.
+     * Shift+Capture: export selection to new file. */
     if (cc === CC_CAPTURE && value > 0) {
-        if (currentView === VIEW_TRIM || currentView === VIEW_LOOP) {
-            if (shiftHeld) {
+        if (shiftHeld) {
+            if (currentView === VIEW_TRIM || currentView === VIEW_LOOP || currentView === VIEW_SLICE) {
                 doExport();
-            } else {
-                saveIndex = 0;
-                saveReturnView = currentView;
-                switchView(VIEW_CONFIRM_SAVE);
             }
+        } else {
+            if (currentView === VIEW_TRIM || currentView === VIEW_LOOP) {
+                switchView(VIEW_SLICE);
+            } else if (currentView === VIEW_SLICE) {
+                /* Restore selection spanning all slices */
+                startSample = sliceBoundaries[0];
+                endSample = sliceBoundaries[sliceCount];
+                syncMarkersToDs();
+                switchView(VIEW_TRIM);
+            }
+        }
+        return;
+    }
+
+    /* Sample button — save with confirmation/options. */
+    if (cc === CC_SAMPLE && value > 0) {
+        if (currentView === VIEW_TRIM || currentView === VIEW_LOOP) {
+            saveItems = saveItemsNormal;
+            saveIndex = 0;
+            saveReturnView = currentView;
+            switchView(VIEW_CONFIRM_SAVE);
+        } else if (currentView === VIEW_SLICE) {
+            saveItems = saveItemsSlice;
+            saveIndex = 0;
+            saveReturnView = currentView;
+            switchView(VIEW_CONFIRM_SAVE);
+        }
+        return;
+    }
+
+    /* Left/Right arrows — nudge selection or jump by selection length */
+    if ((cc === CC_LEFT || cc === CC_RIGHT) && value > 0) {
+        if (currentView === VIEW_TRIM) {
+            var selLen = endSample - startSample;
+            var dir = (cc === CC_LEFT) ? -1 : 1;
+
+            if (shiftHeld) {
+                /* Shift: jump by exactly one selection length */
+                if (dir > 0) {
+                    /* Right: next region starts where current ends */
+                    startSample = endSample;
+                    endSample = startSample + selLen;
+                    if (endSample > totalFrames) {
+                        endSample = totalFrames;
+                        startSample = endSample - selLen;
+                        if (startSample < 0) startSample = 0;
+                    }
+                } else {
+                    /* Left: previous region ends where current starts */
+                    endSample = startSample;
+                    startSample = endSample - selLen;
+                    if (startSample < 0) {
+                        startSample = 0;
+                        endSample = startSample + selLen;
+                        if (endSample > totalFrames) endSample = totalFrames;
+                    }
+                }
+            } else {
+                /* Normal: nudge both markers by one coarse step */
+                var step = getCoarseStep() * dir;
+                var newStart = startSample + step;
+                var newEnd = endSample + step;
+                if (newStart < 0) {
+                    newStart = 0;
+                    newEnd = newStart + selLen;
+                }
+                if (newEnd > totalFrames) {
+                    newEnd = totalFrames;
+                    newStart = newEnd - selLen;
+                }
+                if (newStart < 0) newStart = 0;
+                startSample = newStart;
+                endSample = newEnd;
+            }
+            syncMarkersToDs();
+            refreshWaveform();
+            announce("Start:" + formatTime(startSample));
+        } else if (currentView === VIEW_SLICE) {
+            /* Left/Right: select prev/next slice (wraps) */
+            var sliceDir = (cc === CC_LEFT) ? -1 : 1;
+            var newIdx = selectedSlice + sliceDir;
+            if (newIdx < 0) newIdx = sliceCount - 1;
+            if (newIdx >= sliceCount) newIdx = 0;
+            selectSlice(newIdx);
+            syncMarkersToDs();
+            updateSlicePadLeds();
+            announce("Slice " + (selectedSlice + 1) + "/" + sliceCount);
         }
         return;
     }
@@ -1579,11 +2193,14 @@ function handleCC(cc, value) {
                 menuIndex += delta;
                 if (menuIndex < 0) menuIndex = 0;
                 if (menuIndex >= menuItems.length) menuIndex = menuItems.length - 1;
+                announce(menuItems[menuIndex]);
                 break;
 
             case VIEW_OPEN_FILE:
                 if (openFileBrowserState) {
                     moveFilepathBrowserSelection(openFileBrowserState, delta);
+                    var bsel = openFileBrowserState.items[openFileBrowserState.selectedIndex];
+                    if (bsel) announce(bsel.label);
                 }
                 break;
 
@@ -1591,24 +2208,27 @@ function handleCC(cc, value) {
                 confirmIndex += delta;
                 if (confirmIndex < 0) confirmIndex = 0;
                 if (confirmIndex >= confirmItems.length) confirmIndex = confirmItems.length - 1;
+                announce(confirmItems[confirmIndex]);
                 break;
 
             case VIEW_CONFIRM_NORMALIZE:
                 normalizeIndex += (delta > 0 ? 1 : -1);
                 if (normalizeIndex < 0) normalizeIndex = 0;
                 if (normalizeIndex >= normalizeItems.length) normalizeIndex = normalizeItems.length - 1;
+                announce(normalizeItems[normalizeIndex]);
                 break;
 
             case VIEW_CONFIRM_SAVE:
                 saveIndex += (delta > 0 ? 1 : -1);
                 if (saveIndex < 0) saveIndex = 0;
                 if (saveIndex >= saveItems.length) saveIndex = saveItems.length - 1;
+                announce(saveItems[saveIndex]);
                 break;
 
             case VIEW_TRIM:
                 /* Adjust selected marker: shift = 1 sample, normal = coarse */
                 adjustMarker(selectedField, shiftHeld ? delta : delta * getCoarseStep());
-                showJogStatus("Sel:" + formatSelDuration());
+                showJogStatus((selectedField === 0 ? "Start:" : "End:") + formatTime(selectedField === 0 ? startSample : endSample));
                 refreshWaveform();
                 break;
 
@@ -1617,6 +2237,59 @@ function handleCC(cc, value) {
                 adjustMarker(loopSelectedField, shiftHeld ? delta : delta * getLoopCoarseStep());
                 seamWaveformDirty = true;
                 showJogStatus(loopSelectedField === 0 ? "Pt:" + formatTime(startSample) : "End:" + formatTime(endSample));
+                break;
+
+            case VIEW_SLICE:
+                if (sliceMenuEditing) {
+                    /* Editing the focused parameter */
+                    if (sliceMenuIndex === 0) {
+                        /* Toggle mode */
+                        sliceMode = (sliceMode === SLICE_MODE_EVEN) ? SLICE_MODE_AUTO : SLICE_MODE_EVEN;
+                        recomputeSliceBoundaries();
+                        selectSlice(selectedSlice);
+                        syncMarkersToDs();
+                        updateSlicePadLeds();
+                        showJogStatus(sliceMode === SLICE_MODE_EVEN ? "Even" : "Auto");
+                    } else if (sliceMenuIndex === 1) {
+                        if (sliceMode === SLICE_MODE_EVEN) {
+                            /* Adjust slice count */
+                            sliceCount += (delta > 0 ? 1 : -1);
+                            if (sliceCount < 1) sliceCount = 1;
+                            if (sliceCount > 32) sliceCount = 32;
+                            recomputeSliceBoundaries();
+                            selectSlice(selectedSlice);
+                            syncMarkersToDs();
+                            updateSlicePadLeds();
+                            showJogStatus("Slices:" + sliceCount);
+                        } else {
+                            /* Adjust auto threshold */
+                            sliceThreshold += (delta > 0 ? 1 : -1) * 5;
+                            if (sliceThreshold < 0) sliceThreshold = 0;
+                            if (sliceThreshold > 100) sliceThreshold = 100;
+                            recomputeSliceBoundaries();
+                            selectSlice(selectedSlice);
+                            syncMarkersToDs();
+                            updateSlicePadLeds();
+                            showJogStatus("Thresh:" + sliceThreshold);
+                        }
+                    } else if (sliceMenuIndex === 2) {
+                        /* Cycle selected slice */
+                        var newIdx = selectedSlice + (delta > 0 ? 1 : -1);
+                        if (newIdx < 0) newIdx = sliceCount - 1;
+                        if (newIdx >= sliceCount) newIdx = 0;
+                        selectSlice(newIdx);
+                        syncMarkersToDs();
+                        updateSlicePadLeds();
+                        showJogStatus("Sel:" + (selectedSlice + 1) + "/" + sliceCount);
+                    }
+                } else {
+                    /* Navigate between menu items */
+                    sliceMenuIndex += (delta > 0 ? 1 : -1);
+                    if (sliceMenuIndex < 0) sliceMenuIndex = 0;
+                    if (sliceMenuIndex > 2) sliceMenuIndex = 2;
+                    var itemNames = ["Mode", sliceMode === SLICE_MODE_EVEN ? "Count" : "Thresh", "Select"];
+                    announce(itemNames[sliceMenuIndex]);
+                }
                 break;
         }
         return;
@@ -1653,18 +2326,35 @@ function handleCC(cc, value) {
                 showStatus(loopSelectedField === 0 ? "Loop Point" : "Loop End", 30);
                 break;
 
+            case VIEW_SLICE:
+                /* Toggle editing of current menu item */
+                sliceMenuEditing = !sliceMenuEditing;
+                if (sliceMenuEditing) {
+                    showStatus("Edit", 20);
+                } else {
+                    showStatus("Nav", 20);
+                }
+                break;
+
             case VIEW_OPEN_FILE:
                 if (openFileBrowserState) {
                     var result = activateFilepathBrowserItem(openFileBrowserState);
                     if (result.action === "open") {
                         refreshFilepathBrowser(openFileBrowserState, OPEN_FILE_FS);
+                        var oDir = openFileBrowserState.currentDir || "";
+                        var oDirName = oDir.substring(oDir.lastIndexOf("/") + 1) || "Samples";
+                        var oFirst = (openFileBrowserState.items && openFileBrowserState.items.length > 0)
+                            ? openFileBrowserState.items[0].label : "empty";
+                        announce(oDirName + ", " + oFirst);
                     } else if (result.action === "select") {
+                        openedFilePath = result.value;
                         host_module_set_param("file_path", result.value);
                         refreshFileInfo();
                         waveformDirty = true;
                         refreshWaveform();
                         refreshState();
                         openFileBrowserState = null;
+                        announce("Loaded " + fileName);
                         switchView(VIEW_TRIM);
                     }
                 }
@@ -1681,13 +2371,28 @@ function handleCC(cc, value) {
         if (currentView === VIEW_TRIM) {
             var step = shiftHeld ? 1 : getCoarseStep();
             adjustMarker(0, delta * step);
-            showKnobStatus(0, shiftHeld ? "S:" + startSample : "Sel:" + formatSelDuration());
+            showKnobStatus(0, shiftHeld ? "S:" + startSample : "Start:" + formatTime(startSample));
             refreshWaveform();
         } else if (currentView === VIEW_LOOP) {
             var step = shiftHeld ? 1 : getLoopCoarseStep();
             adjustMarker(0, delta * step);
             seamWaveformDirty = true;
             showKnobStatus(0, shiftHeld ? "S:" + startSample : "Pt:" + formatTime(startSample));
+        } else if (currentView === VIEW_SLICE) {
+            /* E1: Move slice start boundary */
+            var step = shiftHeld ? 1 : getCoarseStep();
+            var bIdx = selectedSlice; /* boundary index for start of selected slice */
+            var newVal = sliceBoundaries[bIdx] + delta * step;
+            /* Constrain: >= previous slice start (or region start for slice 0) */
+            var minVal = (bIdx > 0) ? sliceBoundaries[bIdx - 1] : sliceRegionStart;
+            /* Constrain: < slice end */
+            var maxVal = sliceBoundaries[bIdx + 1] - 1;
+            if (newVal < minVal) newVal = minVal;
+            if (newVal > maxVal) newVal = maxVal;
+            sliceBoundaries[bIdx] = newVal;
+            selectSlice(selectedSlice);
+            syncMarkersToDs();
+            showKnobStatus(0, "Start:" + formatTime(sliceBoundaries[bIdx]));
         }
         return;
     }
@@ -1700,13 +2405,28 @@ function handleCC(cc, value) {
         if (currentView === VIEW_TRIM) {
             var step = shiftHeld ? 1 : getCoarseStep();
             adjustMarker(1, delta * step);
-            showKnobStatus(1, shiftHeld ? "E:" + endSample : "Sel:" + formatSelDuration());
+            showKnobStatus(1, shiftHeld ? "E:" + endSample : "End:" + formatTime(endSample));
             refreshWaveform();
         } else if (currentView === VIEW_LOOP) {
             var step = shiftHeld ? 1 : getLoopCoarseStep();
             adjustMarker(1, delta * step);
             seamWaveformDirty = true;
             showKnobStatus(1, shiftHeld ? "E:" + endSample : "End:" + formatTime(endSample));
+        } else if (currentView === VIEW_SLICE) {
+            /* E2: Move slice end boundary */
+            var step = shiftHeld ? 1 : getCoarseStep();
+            var bIdx = selectedSlice + 1; /* boundary index for end of selected slice */
+            var newVal = sliceBoundaries[bIdx] + delta * step;
+            /* Constrain: > slice start */
+            var minVal = sliceBoundaries[bIdx - 1] + 1;
+            /* Constrain: <= next slice end (or region end for last slice) */
+            var maxVal = (bIdx < sliceBoundaries.length - 1) ? sliceBoundaries[bIdx + 1] : sliceRegionEnd;
+            if (newVal < minVal) newVal = minVal;
+            if (newVal > maxVal) newVal = maxVal;
+            sliceBoundaries[bIdx] = newVal;
+            selectSlice(selectedSlice);
+            syncMarkersToDs();
+            showKnobStatus(1, "End:" + formatTime(sliceBoundaries[bIdx]));
         }
         return;
     }
@@ -1759,6 +2479,29 @@ function handleCC(cc, value) {
                 var seamFactor = Math.pow(2, seamZoomLevel);
                 showKnobStatus(2, "Zoom:" + seamFactor.toFixed(1) + "x");
             }
+        } else if (currentView === VIEW_SLICE) {
+            if (shiftHeld) {
+                vScale *= Math.pow(2, delta * VSCALE_STEP);
+                if (vScale < VSCALE_MIN) vScale = VSCALE_MIN;
+                if (vScale > VSCALE_MAX) vScale = VSCALE_MAX;
+                if (vScale > 0.9 && vScale < 1.1) vScale = 1.0;
+                showKnobStatus(2, "Scale:" + vScale.toFixed(1) + "x");
+            } else {
+                var wasZero = (zoomLevel <= 0);
+                zoomLevel += delta * ZOOM_STEP;
+                if (zoomLevel < 0) zoomLevel = 0;
+                if (zoomLevel > ZOOM_MAX) zoomLevel = ZOOM_MAX;
+                if (wasZero && zoomLevel > 0) {
+                    zoomCenter = startSample;
+                }
+                if (zoomLevel <= 0) {
+                    showKnobStatus(2, "Zoom: Full");
+                } else {
+                    var zoomFactor = Math.pow(2, zoomLevel);
+                    showKnobStatus(2, "Zoom:" + zoomFactor.toFixed(1) + "x");
+                }
+                syncZoomToDsp();
+            }
         }
         return;
     }
@@ -1798,12 +2541,29 @@ function handleNote(note, velocity) {
                 setLED(note, PAD_COLOR_PLAY);
                 activePadNote = note;
                 startPlayback();
-                showStatus(shiftHeld ? "Play All" : "Play Sel", 20);
+                showStatus("Play Sel", 20);
             } else {
                 setLED(note, PAD_COLOR_DIM);
                 if (note === activePadNote) {
                     activePadNote = -1;
                     stopPlayback();
+                }
+            }
+        } else if (currentView === VIEW_SLICE) {
+            var padIdx = note - PAD_NOTE_MIN;
+            if (padIdx < sliceCount) {
+                if (velocity > 0) {
+                    selectSlice(padIdx);
+                    updateSlicePadLeds();
+                    setLED(note, PAD_COLOR_PLAY);
+                    activePadNote = note;
+                    startPlayback();
+                } else {
+                    updateSlicePadLeds();
+                    if (note === activePadNote) {
+                        activePadNote = -1;
+                        stopPlayback();
+                    }
                 }
             }
         }
@@ -1834,12 +2594,14 @@ function handleNote(note, velocity) {
 /* ============ Exported Entry Points ============ */
 
 globalThis.init = function() {
+    openedFilePath = (typeof host_tool_file_path === "string") ? host_tool_file_path : "";
     refreshFileInfo();
     refreshWaveform();
     refreshState();
     currentView = VIEW_TRIM;
     selectedField = 0;
     host_module_set_param("mode", "0");
+    announce("Wave Edit, " + (fileName || "no file") + ", " + formatTime(totalFrames));
 };
 
 globalThis.tick = function() {
@@ -1854,11 +2616,17 @@ globalThis.tick = function() {
 
     /* Flush queued play/stop command — issued here in tick() so it's the
      * last set_param in the frame, after encoder flush has completed.
-     * This prevents knob params from overwriting the play command. */
+     * This prevents knob params from overwriting the play command.
+     * In slice mode, sync markers then use a blocking get_param as a
+     * barrier so the DSP processes markers before we issue play. */
     if (pendingPlay !== "") {
         if (pendingPlay === "stop") {
             host_module_set_param("stop", "1");
         } else {
+            if (currentView === VIEW_SLICE) {
+                syncMarkersToDs();
+                host_module_get_param("dirty"); /* sync barrier: blocks until DSP processes markers */
+            }
             host_module_set_param("play", pendingPlay);
         }
         pendingPlay = "";
@@ -1920,6 +2688,9 @@ globalThis.tick = function() {
             break;
         case VIEW_OPEN_FILE:
             drawOpenFileBrowser();
+            break;
+        case VIEW_SLICE:
+            drawSliceView();
             break;
     }
 };

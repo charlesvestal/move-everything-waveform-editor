@@ -1,4 +1,4 @@
-# CLAUDE.md — Waveform Editor Module
+# CLAUDE.md — Wave Edit Module
 
 External tool module for Move Everything. Full audio waveform editor with trim, gain, copy/paste, and normalize.
 

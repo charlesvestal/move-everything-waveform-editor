@@ -1,4 +1,4 @@
-# Waveform Editor for Move Everything
+# Wave Edit for Move Everything
 
 A full-featured audio waveform editor for your Ableton Move. Trim, gain adjust, normalize, copy/paste, and mute sections of WAV files directly on the device.
 
@@ -23,7 +23,7 @@ A full-featured audio waveform editor for your Ableton Move. Trim, gain adjust, 
 
 1. Launch Move Everything on your Move
 2. Select **Module Store** from the main menu
-3. Navigate to **Tools** > **Waveform Editor**
+3. Navigate to **Tools** > **Wave Edit**
 4. Select **Install**
 
 ### Build from Source

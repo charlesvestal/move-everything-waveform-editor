@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Waveform Editor module for Move Anything
+# Build Wave Edit module for Move Anything
 #
 # This module ships pre-built binaries — no cross-compilation needed.
 # The build script packages src/ files into dist/ for release.
@@ -11,7 +11,7 @@ MODULE_ID="waveform-editor"
 
 cd "$REPO_ROOT"
 
-echo "=== Building Waveform Editor Module ==="
+echo "=== Building Wave Edit Module ==="
 
 # Create dist directory
 rm -rf "dist/$MODULE_ID"
