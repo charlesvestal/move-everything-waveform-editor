@@ -1416,7 +1416,8 @@ function switchView(view) {
     } else if (view === VIEW_CONFIRM_NORMALIZE) {
         announce("Normalize? " + normalizeItems[normalizeIndex]);
     } else if (view === VIEW_CONFIRM_SAVE) {
-        announce("Overwrite? " + saveItems[saveIndex]);
+        var savePrompt = (saveReturnView === VIEW_SLICE) ? "Save slices as? " : "Overwrite? ";
+        announce(savePrompt + saveItems[saveIndex]);
     }
 }
 
@@ -1745,6 +1746,8 @@ function exportSlicedWavs() {
         return;
     }
 
+    announce("Exporting " + sliceCount + " slices");
+
     /* Derive paths */
     var baseName = fileName.replace(/\.wav$/i, "");
     var sampleDir = openedFilePath.substring(0, openedFilePath.lastIndexOf("/"));
@@ -1814,6 +1817,8 @@ function exportRexLoop() {
         showStatus("No slices", 60);
         return;
     }
+
+    announce("Exporting REX loop");
 
     /* First, export the full slice region as a WAV file for rex-encode input */
     var savedStart = startSample;
@@ -2374,7 +2379,8 @@ function handleCC(cc, value) {
             }
             updateSlicePadLeds();
             var bankNum = Math.floor(slicePadOffset / 32) + 1;
-            announce("Pad bank " + bankNum);
+            var totalBanks = Math.floor((sliceCount - 1) / 32) + 1;
+            announce("Pad bank " + bankNum + " of " + totalBanks);
         }
         return;
     }
@@ -2532,9 +2538,10 @@ function handleCC(cc, value) {
                 /* Toggle editing of current menu item */
                 sliceMenuEditing = !sliceMenuEditing;
                 if (sliceMenuEditing) {
-                    showStatus("Edit", 20);
+                    var editNames = ["Editing Mode", "Editing " + (sliceMode === SLICE_MODE_EVEN ? "Count" : "Threshold"), "Editing Slice"];
+                    showStatus(editNames[sliceMenuIndex], 30);
                 } else {
-                    showStatus("Nav", 20);
+                    showStatus("Navigate", 20);
                 }
                 break;
 
@@ -2761,6 +2768,7 @@ function handleNote(note, velocity) {
                     setLED(note, PAD_COLOR_PLAY);
                     activePadNote = note;
                     startPlayback();
+                    showStatus("Slice " + (sliceIdx + 1), 20);
                 } else {
                     updateSlicePadLeds();
                     if (note === activePadNote) {
