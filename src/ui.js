@@ -399,6 +399,32 @@ function showStatus(msg, frames) {
 }
 
 /**
+ * Return the current label+value string for a knob based on the active view.
+ * Used to announce knob identity on touch before it is turned.
+ */
+function getKnobLabel(knobIndex) {
+    if (knobIndex === 0) {
+        if (currentView === VIEW_TRIM) return "Start:" + formatTime(startSample);
+        if (currentView === VIEW_LOOP) return "Pt:" + formatTime(startSample);
+        if (currentView === VIEW_SLICE) return "Start:" + formatTime(sliceBoundaries[selectedSlice]);
+    } else if (knobIndex === 1) {
+        if (currentView === VIEW_TRIM || currentView === VIEW_LOOP) return "End:" + formatTime(endSample);
+        if (currentView === VIEW_SLICE) return "End:" + formatTime(sliceBoundaries[selectedSlice + 1]);
+    } else if (knobIndex === 2) {
+        if (currentView === VIEW_TRIM || currentView === VIEW_SLICE) {
+            if (zoomLevel <= 0) return "Zoom: Full";
+            return "Zoom:" + Math.pow(2, zoomLevel).toFixed(1) + "x";
+        }
+        if (currentView === VIEW_LOOP) {
+            return "Zoom:" + Math.pow(2, seamZoomLevel).toFixed(1) + "x";
+        }
+    } else if (knobIndex === 3) {
+        if (currentView === VIEW_TRIM || currentView === VIEW_LOOP) return "Gain:" + formatDb(gainDb);
+    }
+    return "";
+}
+
+/**
  * Set the status message for a specific knob (persists while touched).
  * knobIndex: 0-7 mapping to physical knobs 1-8.
  */
@@ -2787,6 +2813,12 @@ function handleNote(note, velocity) {
         if (velocity > 0) {
             knobTouched[ki] = true;
             pushTouchOrder(ki);
+            /* Announce knob name + current value on touch */
+            var label = getKnobLabel(ki);
+            if (label !== "") {
+                knobStatusMsg[ki] = label;
+                announce(label);
+            }
         } else {
             knobTouched[ki] = false;
             /* Remove from touch order */
