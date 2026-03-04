@@ -70,6 +70,40 @@
       ]
     },
     {
+      "title": "Slice Mode",
+      "lines": [
+        "Capture: enter/exit",
+        "  slice mode",
+        "",
+        "Jog: navigate footer",
+        "  items (Mode, Count,",
+        "  Select)",
+        "Jog click: toggle",
+        "  edit/navigate mode",
+        "",
+        "E1: adjust slice start",
+        "E2: adjust slice end",
+        "E3: zoom  Shift: scale",
+        "",
+        "Modes: Even (fixed",
+        "  count) or Auto",
+        "  (transient detect)",
+        "",
+        "Pads: select + play",
+        "  slice (hold to",
+        "  audition)",
+        "Left/Right: prev/next",
+        "  slice",
+        "Up/Down: scroll pad",
+        "  banks (>32 slices)",
+        "",
+        "Sample: export slices",
+        "  as WAVs, Drum Kit",
+        "  preset, or REX loop",
+        "Back: return to Edit"
+      ]
+    },
+    {
       "title": "Saving",
       "lines": [
         "Capture: save file",
