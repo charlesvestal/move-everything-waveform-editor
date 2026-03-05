@@ -1502,7 +1502,10 @@ function switchView(view) {
         refreshState();
         refreshWaveform();
         updateSlicePadLeds();
-        announce("Slice, " + fileName);
+        var sliceAnnounce = "Slice";
+        if (sliceMode === SLICE_MODE_LAZY) sliceAnnounce += " Lazy Chop";
+        else if (sliceMode === SLICE_MODE_AUTO) sliceAnnounce += " Auto";
+        announce(sliceAnnounce + ", " + fileName);
     } else if (view === VIEW_MODE_MENU) {
         announce("Menu, " + menuItems[menuIndex]);
     } else if (view === VIEW_CONFIRM_EXIT) {
@@ -2259,7 +2262,7 @@ function handleCC(cc, value) {
                     selectedSlice = 0;
                     selectSlice(0);
                     updateSlicePadLeds();
-                    showStatus("Chop done", 30);
+                    showStatus("Chop done, " + sliceCount + " slices", 30);
                 } else {
                     /* Restore selection spanning all slices */
                     startSample = sliceBoundaries[0];
@@ -2392,6 +2395,7 @@ function handleCC(cc, value) {
                 if (lazyChopping) {
                     stopPlayback();
                     lazyChopping = false;
+                    announce("Chop stopped");
                 }
                 /* Restore selection spanning all slices */
                 startSample = sliceBoundaries[0];
@@ -2587,15 +2591,15 @@ function handleCC(cc, value) {
                         selectSlice(0);
                         syncMarkersToDs();
                         updateSlicePadLeds();
-                        var modeNames = ["Even", "Auto", "Lazy"];
-                        announce(modeNames[sliceMode]);
+                        var modeAnnounce = sliceMode === SLICE_MODE_LAZY ? "Lazy, press Pad 1" : (sliceMode === SLICE_MODE_AUTO ? "Auto" : "Even");
+                        announce(modeAnnounce);
                     } else if (sliceMenuIndex === 1) {
                         if (sliceMode === SLICE_MODE_LAZY) {
                             /* Toggle Chop / Play sub-mode */
                             lazySub = (lazySub === LAZY_SUB_CHOP) ? LAZY_SUB_PLAY : LAZY_SUB_CHOP;
                             lazyChopping = false;
                             updateSlicePadLeds();
-                            announce(lazySub === LAZY_SUB_CHOP ? "Chop" : "Play");
+                            announce(lazySub === LAZY_SUB_CHOP ? "Chop, press Pad 1" : "Play");
                         } else if (sliceMode === SLICE_MODE_EVEN) {
                             /* Adjust slice count */
                             sliceCount += (delta > 0 ? 1 : -1);
@@ -2638,7 +2642,7 @@ function handleCC(cc, value) {
                     sliceMenuIndex += (delta > 0 ? 1 : -1);
                     if (sliceMenuIndex < 0) sliceMenuIndex = 0;
                     if (sliceMenuIndex > 2) sliceMenuIndex = 2;
-                    var param2Name = sliceMode === SLICE_MODE_LAZY ? "Sub" : (sliceMode === SLICE_MODE_EVEN ? "Count" : "Thresh");
+                    var param2Name = sliceMode === SLICE_MODE_LAZY ? "Sub-mode" : (sliceMode === SLICE_MODE_EVEN ? "Count" : "Thresh");
                     var itemNames = ["Mode", param2Name, "Select"];
                     announce(itemNames[sliceMenuIndex]);
                 }
@@ -3038,7 +3042,7 @@ globalThis.tick = function() {
                 selectedSlice = 0;
                 selectSlice(0);
                 updateSlicePadLeds();
-                showStatus("Chop done", 30);
+                showStatus("Chop done, " + sliceCount + " slices", 30);
             }
         }
     }
