@@ -71,6 +71,9 @@ typedef struct {
     int sample_rate;
     int channels;
     int total_frames;
+    uint16_t orig_format;       /* 1=PCM, 3=IEEE float */
+    uint16_t orig_bits;         /* 16, 24, or 32 */
+    uint16_t orig_channels;     /* 1=mono, 2=stereo */
     float duration_secs;
 
     int16_t *audio_data;        /* Stereo interleaved PCM buffer (L,R,L,R,...) */
@@ -413,6 +416,9 @@ static int load_wav(instance_t *inst, const char *path) {
     inst->sample_rate = (int)wav_sample_rate;
     inst->channels = 2; /* Always stereo internally */
     inst->total_frames = total_frames;
+    inst->orig_format = audio_format;
+    inst->orig_bits = bits_per_sample;
+    inst->orig_channels = num_channels;
     inst->duration_secs = (float)total_frames / (float)wav_sample_rate;
 
     inst->start_sample = 0;
@@ -442,12 +448,14 @@ static int load_wav(instance_t *inst, const char *path) {
 }
 
 /*
- * Write stereo int16 PCM data as a WAV file.
- * data is interleaved stereo (L,R,L,R,...), num_frames frames.
+ * Write WAV file from interleaved stereo int16 data.
+ * out_fmt: 1=PCM, 3=IEEE float.  out_bits: 16, 24, or 32.
+ * out_channels: 1=mono (uses L channel), 2=stereo.
  * Returns 0 on success, -1 on error.
  */
 static int write_wav(const char *path, const int16_t *data, int num_frames,
-                     int sample_rate) {
+                     int sample_rate, uint16_t out_fmt, uint16_t out_bits,
+                     uint16_t out_channels) {
     if (!path || !data || num_frames <= 0) return -1;
 
     FILE *f = fopen(path, "wb");
@@ -458,7 +466,9 @@ static int write_wav(const char *path, const int16_t *data, int num_frames,
         return -1;
     }
 
-    uint32_t data_size = (uint32_t)num_frames * SAMPLES_PER_FRAME * sizeof(int16_t);
+    int bytes_per_sample = out_bits / 8;
+    int block_align = out_channels * bytes_per_sample;
+    uint32_t data_size = (uint32_t)num_frames * (uint32_t)block_align;
     uint32_t file_size = 36 + data_size;
 
     uint8_t header[44];
@@ -470,34 +480,54 @@ static int write_wav(const char *path, const int16_t *data, int num_frames,
 
     /* fmt chunk */
     memcpy(header + 12, "fmt ", 4);
-    write_u32_le(header + 16, 16);          /* chunk size */
-    write_u16_le(header + 20, 1);           /* PCM format */
-    write_u16_le(header + 22, 2);           /* stereo */
+    write_u32_le(header + 16, 16);
+    write_u16_le(header + 20, out_fmt);
+    write_u16_le(header + 22, out_channels);
     write_u32_le(header + 24, (uint32_t)sample_rate);
-    write_u32_le(header + 28, (uint32_t)(sample_rate * SAMPLES_PER_FRAME * sizeof(int16_t))); /* byte rate */
-    write_u16_le(header + 32, SAMPLES_PER_FRAME * sizeof(int16_t)); /* block align */
-    write_u16_le(header + 34, 16);          /* bits per sample */
+    write_u32_le(header + 28, (uint32_t)(sample_rate * block_align));
+    write_u16_le(header + 32, (uint16_t)block_align);
+    write_u16_le(header + 34, out_bits);
 
     /* data chunk */
     memcpy(header + 36, "data", 4);
     write_u32_le(header + 40, data_size);
 
     size_t written = fwrite(header, 1, 44, f);
-    if (written != 44) {
-        fclose(f);
-        return -1;
+    if (written != 44) { fclose(f); return -1; }
+
+    /* Write sample data, converting from internal stereo int16 */
+    int ok = 1;
+    for (int i = 0; i < num_frames && ok; i++) {
+        for (int ch = 0; ch < out_channels; ch++) {
+            int16_t s = data[i * 2 + ch]; /* ch=0 is L, ch=1 is R */
+
+            if (out_fmt == 3 && out_bits == 32) {
+                /* IEEE float 32-bit */
+                float fs = (float)s / 32767.0f;
+                if (fwrite(&fs, sizeof(float), 1, f) != 1) ok = 0;
+            } else if (out_fmt == 1 && out_bits == 24) {
+                /* PCM 24-bit */
+                int32_t s24 = (int32_t)s << 8;
+                uint8_t b[3] = { (uint8_t)(s24 & 0xFF),
+                                 (uint8_t)((s24 >> 8) & 0xFF),
+                                 (uint8_t)((s24 >> 16) & 0xFF) };
+                if (fwrite(b, 3, 1, f) != 1) ok = 0;
+            } else {
+                /* PCM 16-bit */
+                if (fwrite(&s, sizeof(int16_t), 1, f) != 1) ok = 0;
+            }
+        }
     }
-
-    size_t total_samples = (size_t)num_frames * SAMPLES_PER_FRAME;
-    written = fwrite(data, sizeof(int16_t), total_samples, f);
     fclose(f);
-
-    if (written != total_samples) return -1;
+    if (!ok) return -1;
 
     {
         char log_buf[256];
+        const char *fmt_name = (out_fmt == 3) ? "float" : "PCM";
         snprintf(log_buf, sizeof(log_buf),
-                 "Wrote WAV: %s (%d frames, stereo 16-bit)", path, num_frames);
+                 "Wrote WAV: %s (%d frames, %s %d-bit %s)",
+                 path, num_frames, fmt_name, out_bits,
+                 out_channels == 1 ? "mono" : "stereo");
         plugin_log(log_buf);
     }
 
@@ -728,6 +758,11 @@ static void* v2_create(const char *module_dir, const char *json_defaults) {
     inst->peak_db = -96.0f;
     inst->mode = 0;
     inst->zoom_level = 0;
+
+    /* Default output format for new recordings */
+    inst->orig_format = 1;    /* PCM */
+    inst->orig_bits = 16;
+    inst->orig_channels = 2;  /* stereo */
 
     plugin_log("Instance created");
     return inst;
@@ -1112,7 +1147,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
 
         /* Write the selection to file */
         if (write_wav(out_path, inst->audio_data + start * SAMPLES_PER_FRAME, copy_frames,
-                      inst->sample_rate) == 0) {
+                      inst->sample_rate, inst->orig_format, inst->orig_bits,
+                      inst->orig_channels) == 0) {
             const char *out_name = basename_ptr(out_path);
             strncpy(inst->copy_result, out_name,
                     sizeof(inst->copy_result) - 1);
@@ -1433,7 +1469,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         }
 
         if (write_wav(inst->file_path, inst->audio_data, inst->audio_frames,
-                      inst->sample_rate) == 0) {
+                      inst->sample_rate, inst->orig_format, inst->orig_bits,
+                      inst->orig_channels) == 0) {
             inst->dirty = 0;
             plugin_log("File saved");
         } else {
@@ -1443,13 +1480,14 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     }
 
     if (strcmp(key, "save_as") == 0) {
-        /* Save full audio to a specified path (stereo 16-bit PCM) */
+        /* Save full audio to a specified path in original format */
         if (!inst->audio_data || inst->audio_frames <= 0 || !val || val[0] == '\0') {
             plugin_log("save_as: no audio or no path");
             return;
         }
         if (write_wav(val, inst->audio_data, inst->audio_frames,
-                      inst->sample_rate) == 0) {
+                      inst->sample_rate, inst->orig_format, inst->orig_bits,
+                      inst->orig_channels) == 0) {
             char log_buf[256];
             snprintf(log_buf, sizeof(log_buf), "Saved copy to: %s", val);
             plugin_log(log_buf);
