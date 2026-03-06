@@ -192,7 +192,7 @@ var LAZY_SUB_PLAY = 1;
 var lazySub = LAZY_SUB_CHOP;
 var lazyChopping = false;
 var sliceCount = 1;
-var sliceThreshold = 50;
+var sliceThreshold = 5.0;
 var sliceBoundaries = [];
 var selectedSlice = 0;
 var sliceRegionStart = 0;
@@ -1405,7 +1405,7 @@ function drawSliceView() {
         } else if (sliceMode === SLICE_MODE_EVEN) {
             countLabel = "" + sliceCount;
         } else {
-            countLabel = "T:" + sliceThreshold;
+            countLabel = "T:" + sliceThreshold.toFixed(1);
         }
         var selLabel = (selectedSlice + 1) + "/" + sliceCount;
         if (sliceCount > 32) {
@@ -2814,15 +2814,16 @@ function handleCC(cc, value) {
                             updateSlicePadLeds();
                             announce("Slices:" + sliceCount);
                         } else {
-                            /* Adjust auto threshold */
-                            sliceThreshold += (delta > 0 ? 1 : -1) * 5;
-                            if (sliceThreshold < 0) sliceThreshold = 0;
+                            /* Adjust auto threshold (jog = fine 0.1 steps) */
+                            sliceThreshold += delta * 0.1;
+                            sliceThreshold = Math.round(sliceThreshold * 10) / 10;
+                            if (sliceThreshold < 0.1) sliceThreshold = 0.1;
                             if (sliceThreshold > 100) sliceThreshold = 100;
                             recomputeSliceBoundaries();
                             selectSlice(selectedSlice);
                             syncMarkersToDs();
                             updateSlicePadLeds();
-                            announce("Thresh:" + sliceThreshold);
+                            announce("Thresh:" + sliceThreshold.toFixed(1));
                         }
                     } else if (sliceMenuIndex === 2) {
                         /* Cycle selected slice */
@@ -3109,6 +3110,22 @@ function handleCC(cc, value) {
 
     /* E4 turn: adjust gain | Shift+E4 press: normalize confirm */
     if (cc === CC_E4) {
+        if (currentView === VIEW_SLICE && sliceMode === SLICE_MODE_AUTO) {
+            /* E4 in auto slice: adjust threshold (coarse=1.0, shift=0.1) */
+            var delta = decodeDelta(value);
+            if (delta === 0) return;
+            var step = shiftHeld ? 0.1 : 1.0;
+            sliceThreshold += delta * step;
+            sliceThreshold = Math.round(sliceThreshold * 10) / 10;
+            if (sliceThreshold < 0.1) sliceThreshold = 0.1;
+            if (sliceThreshold > 100) sliceThreshold = 100;
+            recomputeSliceBoundaries();
+            selectSlice(selectedSlice);
+            syncMarkersToDs();
+            updateSlicePadLeds();
+            showKnobStatus(3, "T:" + sliceThreshold.toFixed(1));
+            return;
+        }
         if (currentView === VIEW_TRIM || currentView === VIEW_LOOP) {
             if (shiftHeld) {
                 /* Shift+E4: show normalize confirm overlay */

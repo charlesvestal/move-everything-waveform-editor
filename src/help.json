@@ -109,6 +109,8 @@
         "E1: adjust slice start",
         "E2: adjust slice end",
         "E3: zoom  Shift: scale",
+        "E4: threshold (Auto)",
+        "  Shift: fine (0.1)",
         "",
         "Modes: Even (fixed",
         "  count), Auto",
