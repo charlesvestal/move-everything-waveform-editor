@@ -264,6 +264,7 @@ var recSourceActiveId = null;   /* Currently loaded source module ID */
 var recSourceActiveAbbrev = ""; /* Abbreviation for display */
 var pendingRecSourceOpen = false; /* Flag to open picker after save */
 var recSourceWaitingForAudio = false; /* Waiting for source to produce audio before auto-record */
+var recSourceFromNewRecording = false; /* Picker was opened from New Recording flow */
 
 /**
  * Generate a timestamped recording filename.
@@ -1938,6 +1939,8 @@ function returnToSaveView() {
  */
 function refreshRecSourceModules() {
     recSourceModules = [];
+    /* Line In is always first — uses default resample recording */
+    recSourceModules.push({ id: "__linein__", name: "Line In", abbrev: "LI" });
     if (typeof host_list_modules === "function") {
         var modules = host_list_modules();
         for (var i = 0; i < modules.length; i++) {
@@ -1946,7 +1949,10 @@ function refreshRecSourceModules() {
             }
         }
     }
-    recSourceModules.push({ id: null, name: "None", abbrev: "" });
+    /* None option to disconnect an active source */
+    if (recSourceActiveId) {
+        recSourceModules.push({ id: null, name: "None", abbrev: "" });
+    }
 }
 
 /**
@@ -2003,6 +2009,8 @@ function openRecSourcePicker() {
  */
 function selectRecSource() {
     var selected = recSourceModules[recSourceIndex];
+    var fromNewRec = recSourceFromNewRecording;
+    recSourceFromNewRecording = false;
 
     if (selected.id === null) {
         /* "None" selected — disconnect */
@@ -2017,11 +2025,35 @@ function selectRecSource() {
         return;
     }
 
+    if (selected.id === "__linein__") {
+        /* Line In — disconnect any active source, use default resample recording */
+        if (recSourceActiveId) {
+            host_source_unload();
+            recSourceActiveId = null;
+            recSourceActiveAbbrev = "";
+            recSourceWaitingForAudio = false;
+        }
+        if (fromNewRec) {
+            recordState = "ready";
+            recordLedCounter = 0;
+            switchView(VIEW_TRIM);
+            announce("New Recording, press REC to record");
+        } else {
+            switchView(VIEW_TRIM);
+            showStatus("Source: Line In", 60);
+        }
+        return;
+    }
+
     if (selected.id === recSourceActiveId) {
         /* Already loaded — go back to editor, auto-record when audio flows */
         recSourceWaitingForAudio = true;
         switchView(VIEW_TRIM);
-        showStatus("Source: " + (selected.abbrev || selected.id) + " ready", 90);
+        if (fromNewRec) {
+            showStatus("Waiting for audio from " + (selected.abbrev || selected.id), 120);
+        } else {
+            showStatus("Source: " + (selected.abbrev || selected.id) + " ready", 90);
+        }
         return;
     }
 
@@ -2689,7 +2721,8 @@ function handleCC(cc, value) {
                 switchView(saveReturnView);
                 break;
             case VIEW_REC_SOURCE:
-                switchView(VIEW_TRIM);
+                recSourceFromNewRecording = false;
+                switchView(VIEW_MODE_MENU);
                 break;
             case VIEW_OPEN_FILE:
                 if (openFileBrowserState && openFileBrowserState.currentDir !== openFileBrowserState.root) {
@@ -3192,11 +3225,10 @@ function handleCC(cc, value) {
                     if (selItem && selItem.kind === "action") {
                         recordBrowserDir = openFileBrowserState.currentDir;
                         recordFilePath = generateRecordingPath(recordBrowserDir);
-                        recordState = "ready";
-                        recordLedCounter = 0;
                         openFileBrowserState = null;
-                        switchView(VIEW_TRIM);
-                        announce("New Recording, press REC to record");
+                        /* Open rec source picker — user chooses source before recording */
+                        recSourceFromNewRecording = true;
+                        openRecSourcePicker();
                         break;
                     }
                     var result = activateFilepathBrowserItem(openFileBrowserState);
@@ -3562,14 +3594,13 @@ globalThis.init = function() {
     selectedField = 0;
     host_module_set_param("mode", "0");
 
-    /* If the file didn't load (new file path), enter record-ready state */
+    /* If the file didn't load (new file path), open rec source picker */
     if (openedFilePath && totalFrames === 0) {
         var lastSlash = openedFilePath.lastIndexOf("/");
         recordBrowserDir = lastSlash > 0 ? openedFilePath.substring(0, lastSlash) : "";
         recordFilePath = openedFilePath;
-        recordState = "ready";
-        recordLedCounter = 0;
-        announce("New Recording, press REC to record");
+        recSourceFromNewRecording = true;
+        openRecSourcePicker();
     } else {
         announce("Wave Edit, " + (fileName || "no file") + ", " + formatTime(totalFrames));
     }
