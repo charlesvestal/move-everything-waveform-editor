@@ -39,7 +39,7 @@ import * as os from 'os';
 /* Shared utilities - absolute path for module location independence */
 import {
     MidiNoteOn, MidiCC,
-    MoveShift, MoveMainKnob, MoveMainButton, MoveBack,
+    MoveShift, MoveMainKnob, MoveMainButton, MoveBack, MoveMenu,
     MoveCapture, MoveRec, MoveSample, MoveUndo, MoveLoop, MoveCopy, MoveMute, MoveDelete,
     MoveLeft, MoveRight, MoveDown, MoveUp,
     MovePads,
@@ -2620,6 +2620,14 @@ function handleCC(cc, value) {
 
     /* Only handle presses (value > 0) for remaining CCs, except jog/encoders */
     var isEncoder = (cc === CC_JOG || cc === CC_E1 || cc === CC_E2 || cc === CC_E3 || cc === CC_E4 || cc === CC_E5 || cc === CC_E7 || cc === CC_E8);
+
+    /* Menu button (CC 50) — open rec source picker */
+    if (cc === MoveMenu && value > 0) {
+        if (currentView === VIEW_REC_SOURCE) return;
+        if (recordState !== "idle") return;
+        openRecSourcePicker();
+        return;
+    }
 
     /* Back button */
     if (cc === CC_BACK && value > 0) {
