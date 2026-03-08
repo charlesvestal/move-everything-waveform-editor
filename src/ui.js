@@ -14,7 +14,7 @@
  * count. decodeDelta() returns the signed count for proportional response.
  *
  * Controls:
- *   Jog wheel    - Move selected marker  |  Menu: navigate
+ *   Jog wheel    - Scroll view (zoomed) / Move marker (unzoomed)  |  Menu: navigate
  *   Jog click    - Toggle start/end field |  Menu: select item
  *   E1 (Knob 1)  - Move start marker
  *   E2 (Knob 2)  - Move end marker
@@ -3184,10 +3184,19 @@ function handleCC(cc, value) {
                 break;
 
             case VIEW_TRIM:
-                /* Adjust selected marker: shift = 1 sample, normal = coarse */
-                adjustMarker(selectedField, shiftHeld ? delta : delta * getCoarseStep());
-                showJogStatus((selectedField === 0 ? "Start:" : "End:") + formatTime(selectedField === 0 ? startSample : endSample));
-                refreshWaveform();
+                if (zoomLevel > 0) {
+                    /* Zoomed in: scroll viewport. Shift = fine (1px), normal = 1/8 view */
+                    var scrollStep = shiftHeld
+                        ? Math.max(1, Math.floor(getVisibleSamples() / SCREEN_W))
+                        : Math.max(1, Math.floor(getVisibleSamples() / 8));
+                    zoomCenter += delta * scrollStep;
+                    /* Clamp so the visible window stays within file boundaries */
+                    var visHalf = Math.floor(getVisibleSamples() / 2);
+                    if (zoomCenter < visHalf) zoomCenter = visHalf;
+                    if (zoomCenter > totalFrames - visHalf) zoomCenter = totalFrames - visHalf;
+                    refreshWaveform();
+                    showJogStatus("Pos:" + formatTime(getVisibleStart()));
+                }
                 break;
 
             case VIEW_LOOP:
