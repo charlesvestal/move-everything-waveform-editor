@@ -3375,13 +3375,31 @@ globalThis.init = function() {
         if (stillRecording) {
             recordState = "recording";
             recordFilePath = openedFilePath;
-            recordWaveform = [];
-            recordWriteHead = 0;
-            recordStartTime = Date.now();  /* Approximate — real start time is lost */
             recordLedCounter = 0;
             currentView = VIEW_TRIM;
             selectedField = 0;
-            announce("Wave Edit, recording in progress");
+
+            /* Recover actual elapsed time from sampler's sample counter */
+            var samplesWritten = 0;
+            if (typeof host_sampler_get_samples_written === "function") {
+                samplesWritten = host_sampler_get_samples_written();
+            }
+            var elapsedSec = samplesWritten / 44100;
+            recordStartTime = Date.now() - (elapsedSec * 1000);
+
+            /* Reconstruct waveform array with placeholder entries so the
+             * write head position reflects actual recording progress.
+             * Each tick adds one entry, ticks are ~16ms apart. */
+            var estimatedTicks = Math.round(elapsedSec * 1000 / 16);
+            recordWaveform = [];
+            for (var i = 0; i < estimatedTicks; i++) {
+                recordWaveform.push(0.05);  /* dim baseline so it's visible */
+            }
+            recordWriteHead = recordWaveform.length;
+
+            var timeStr = Math.floor(elapsedSec / 60) + ":" +
+                (elapsedSec % 60 < 10 ? "0" : "") + Math.floor(elapsedSec % 60);
+            announce("Wave Edit, recording in progress, " + timeStr);
         } else if (openedFilePath && totalFrames === 0) {
             /* File path set but no audio data — restore record-ready state */
             var lastSlash = openedFilePath.lastIndexOf("/");
