@@ -226,7 +226,7 @@ var REX_ENCODE_BIN = REX_MODULE_PATH + "/rex-encode";
 var REX_LOOPS_DIR = REX_MODULE_PATH + "/loops";
 
 /* Mode menu */
-var menuItems = ["Edit", "Loop", "Open File", "Exit Editor"];
+var menuItems = ["Edit", "Loop", "Open File", "Close Session"];
 var menuIndex = 0;
 
 /* Open File browser state */
@@ -1709,8 +1709,8 @@ function menuSelect() {
         case 2: /* Open File */
             enterOpenFileBrowser();
             break;
-        case 3: /* Exit Editor */
-            attemptExit();
+        case 3: /* Close Session */
+            attemptFullExit();
             break;
     }
 }
@@ -1792,7 +1792,7 @@ function confirmSelect() {
     switch (confirmIndex) {
         case 0: /* Save & Exit */
             doSave();
-            exitEditor();
+            fullExit();
             break;
         case 1: /* Discard */
             if (isRecordedFile && recordFilePath) {
@@ -1801,7 +1801,7 @@ function confirmSelect() {
                     host_system_cmd("rm -f '" + recordFilePath + "'");
                 }
             }
-            exitEditor();
+            fullExit();
             break;
         case 2: /* Cancel */
             switchView(VIEW_MODE_MENU);
@@ -1893,10 +1893,35 @@ function attemptExit() {
 }
 
 /**
+ * Attempt full exit (unload DSP). If dirty, show confirm dialog; otherwise full exit.
+ */
+function attemptFullExit() {
+    refreshState();
+    if (dirty || gainDb !== 0.0) {
+        confirmIndex = 0;
+        switchView(VIEW_CONFIRM_EXIT);
+    } else {
+        fullExit();
+    }
+}
+
+/**
  * Exit the editor. Signals intent to DSP. Actual exit happens via
  * the overtake exit mechanism (Shift+Vol+Jog Click) or host navigation.
  */
 function exitEditor() {
+    if (typeof host_hide_module === "function") {
+        host_hide_module();
+    } else if (typeof host_exit_module === "function") {
+        host_exit_module();
+    }
+}
+
+/**
+ * Full exit — unloads DSP. Used from confirm dialog "Discard" or
+ * "Close Session" menu when user explicitly wants to close.
+ */
+function fullExit() {
     if (typeof host_exit_module === "function") {
         host_exit_module();
     }
@@ -2472,7 +2497,7 @@ function handleCC(cc, value) {
         switch (currentView) {
             case VIEW_TRIM:
             case VIEW_LOOP:
-                attemptExit();
+                exitEditor();
                 break;
             case VIEW_SLICE:
                 if (sliceMode === SLICE_MODE_LAZY && lazyChopping) {
@@ -2497,7 +2522,7 @@ function handleCC(cc, value) {
                 }
                 break;
             case VIEW_MODE_MENU:
-                attemptExit();
+                exitEditor();
                 break;
             case VIEW_CONFIRM_EXIT:
                 switchView(VIEW_TRIM);
@@ -3347,24 +3372,47 @@ function handleNote(note, velocity) {
 /* ============ Exported Entry Points ============ */
 
 globalThis.init = function() {
+    var isReconnect = (typeof host_tool_reconnect !== "undefined" && host_tool_reconnect);
+
     openedFilePath = (typeof host_tool_file_path === "string") ? host_tool_file_path : "";
     refreshFileInfo();
     refreshWaveform();
     refreshState();
-    currentView = VIEW_TRIM;
-    selectedField = 0;
-    host_module_set_param("mode", "0");
 
-    /* If the file didn't load (new file path), enter record-ready state */
-    if (openedFilePath && totalFrames === 0) {
-        var lastSlash = openedFilePath.lastIndexOf("/");
-        recordBrowserDir = lastSlash > 0 ? openedFilePath.substring(0, lastSlash) : "";
-        recordFilePath = openedFilePath;
-        recordState = "ready";
-        recordLedCounter = 0;
-        announce("New Recording, press REC to record");
+    if (isReconnect) {
+        /* Reconnecting to existing session — restore view based on DSP state */
+        /* Check if DSP is still recording */
+        var stillRecording = (typeof host_sampler_is_recording === "function") && host_sampler_is_recording();
+        if (stillRecording) {
+            recordState = "recording";
+            recordLedCounter = 0;
+            currentView = VIEW_TRIM;
+            selectedField = 0;
+            announce("Wave Edit, recording in progress");
+        } else {
+            currentView = VIEW_TRIM;
+            selectedField = 0;
+            announce("Wave Edit, " + (fileName || "no file") + ", " + formatTime(totalFrames));
+        }
+        /* Force full LED repaint */
+        ledInitPending = true;
+        ledInitStep = 0;
     } else {
-        announce("Wave Edit, " + (fileName || "no file") + ", " + formatTime(totalFrames));
+        /* Fresh session */
+        currentView = VIEW_TRIM;
+        selectedField = 0;
+        host_module_set_param("mode", "0");
+
+        if (openedFilePath && totalFrames === 0) {
+            var lastSlash = openedFilePath.lastIndexOf("/");
+            recordBrowserDir = lastSlash > 0 ? openedFilePath.substring(0, lastSlash) : "";
+            recordFilePath = openedFilePath;
+            recordState = "ready";
+            recordLedCounter = 0;
+            announce("New Recording, press REC to record");
+        } else {
+            announce("Wave Edit, " + (fileName || "no file") + ", " + formatTime(totalFrames));
+        }
     }
 };
 
