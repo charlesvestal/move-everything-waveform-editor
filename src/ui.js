@@ -310,11 +310,7 @@ function isScratchFile() {
 }
 
 function nameMatchesCurrent() {
-    var targetName = saveName;
-    if (targetName.toLowerCase().indexOf(".wav") !== targetName.length - 4) {
-        targetName = targetName + ".wav";
-    }
-    return targetName === fileName;
+    return ensureWavExt(saveName) === fileName;
 }
 
 function leafFolder(path) {
@@ -324,6 +320,18 @@ function leafFolder(path) {
     var dir = path.substring(0, lastSlash);
     var leaf = dir.substring(dir.lastIndexOf("/") + 1);
     return leaf;
+}
+
+function ensureWavExt(name) {
+    if (name.toLowerCase().indexOf(".wav") !== name.length - 4) {
+        return name + ".wav";
+    }
+    return name;
+}
+
+function sanitizeForShell(s) {
+    /* Replace single quotes with escaped version for sh -c '...' usage */
+    return s.replace(/'/g, "'\\''");
 }
 
 function isRexAvailable() {
@@ -1879,10 +1887,7 @@ function normalizeSelect() {
  * Returns the permanent path, or "" on failure.
  */
 function ensureSourceSaved() {
-    var targetName = saveName;
-    if (targetName.toLowerCase().indexOf(".wav") !== targetName.length - 4) {
-        targetName = targetName + ".wav";
-    }
+    var targetName = ensureWavExt(saveName);
     /* Scratch files go to SAVE_DIR; existing files stay in their folder */
     var destDir = isScratchFile()
         ? SAVE_DIR
@@ -1897,7 +1902,7 @@ function ensureSourceSaved() {
         /* Name changed or scratch — copy to new path */
         if (typeof host_system_cmd === "function") {
             host_ensure_dir(destDir);
-            var result = host_system_cmd("cp '" + openedFilePath + "' '" + destPath + "'");
+            var result = host_system_cmd("cp '" + sanitizeForShell(openedFilePath) + "' '" + sanitizeForShell(destPath) + "'");
             if (result === 0) {
                 openedFilePath = destPath;
                 host_module_set_param("file_path", destPath);
@@ -1921,10 +1926,7 @@ function ensureSourceSaved() {
  * Calls onConfirm() if OK to proceed, does nothing if user cancels.
  */
 function checkOverwriteThenDo(action) {
-    var targetName = saveName;
-    if (targetName.toLowerCase().indexOf(".wav") !== targetName.length - 4) {
-        targetName = targetName + ".wav";
-    }
+    var targetName = ensureWavExt(saveName);
     /* Match destDir logic from ensureSourceSaved */
     var destDir = isScratchFile()
         ? SAVE_DIR
@@ -2193,10 +2195,7 @@ function doPaste() {
 }
 
 /**
- * Export selection to new file (filename_edit.wav).
- */
-/**
- * Save As — prompt for filename, copy scratch file to permanent location.
+ * Save As — prompt for filename, copy file to permanent location.
  * Opens the text entry keyboard with a pre-filled timestamp name.
  */
 function doSaveAs(onDone) {
@@ -2215,18 +2214,21 @@ function doSaveAs(onDone) {
                 showStatus("Cancelled", 60);
                 return;
             }
-            /* Ensure .wav extension */
-            var destName = name;
-            if (destName.toLowerCase().indexOf(".wav") !== destName.length - 4) {
-                destName = destName + ".wav";
+            var destName = ensureWavExt(name);
+            var destDir = isScratchFile()
+                ? SAVE_DIR
+                : openedFilePath.substring(0, openedFilePath.lastIndexOf("/"));
+            var destPath = destDir + "/" + destName;
+            /* Apply pending edits before copying */
+            if (gainDb !== 0.0) {
+                host_module_set_param("apply_gain", "1");
             }
-            var destPath = SAVE_DIR + "/" + destName;
-            /* Copy scratch file to destination */
+            host_module_set_param("save", "1");
+            /* Copy to destination */
             if (typeof host_system_cmd === "function") {
-                host_ensure_dir(SAVE_DIR);
-                var result = host_system_cmd("cp '" + SCRATCH_PATH + "' '" + destPath + "'");
+                host_ensure_dir(destDir);
+                var result = host_system_cmd("cp '" + sanitizeForShell(openedFilePath) + "' '" + sanitizeForShell(destPath) + "'");
                 if (result === 0) {
-                    /* Reload from the new permanent path */
                     openedFilePath = destPath;
                     host_module_set_param("file_path", destPath);
                     refreshFileInfo();
@@ -2241,7 +2243,7 @@ function doSaveAs(onDone) {
             }
         },
         onCancel: function() {
-            /* User cancelled — stay on scratch file */
+            /* User cancelled — stay on current file */
         }
     });
 }
@@ -2385,7 +2387,9 @@ function exportRexLoop(overrideName) {
     var baseName = overrideName
         ? overrideName.replace(/\.wav$/i, "")
         : fileName.replace(/\.wav$/i, "");
-    var sampleDir = openedFilePath.substring(0, openedFilePath.lastIndexOf("/"));
+    var sampleDir = isScratchFile()
+        ? SAVE_DIR
+        : openedFilePath.substring(0, openedFilePath.lastIndexOf("/"));
     var editPath = sampleDir + "/" + exportResult;
     var rx2Path = REX_LOOPS_DIR + "/" + baseName + ".rx2";
 
