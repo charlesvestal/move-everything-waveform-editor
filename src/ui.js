@@ -3048,7 +3048,7 @@ function handleCC(cc, value) {
 
     /* Mute button — set marker at current playback position */
     if (cc === CC_MUTE && value > 0) {
-        if (currentView === VIEW_TRIM || currentView === VIEW_BPM_TRIM) {
+        if ((currentView === VIEW_TRIM || currentView === VIEW_BPM_TRIM) && playing) {
             if (shiftHeld) {
                 /* Shift+Mute: set end marker at play position */
                 endSample = playPos;
