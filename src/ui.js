@@ -21,12 +21,15 @@
  *   E3 (Knob 3)   - Zoom in/out  |  Shift: vertical scale (1x-32x)
  *   E4 (Knob 4)   - Adjust gain  |  Shift: normalize (confirm overlay)
  *   Any pad       - Hold to audition selection, release to stop
- *   Mute          - Mute (zero out) selection
- *   Copy          - Copy selection to clipboard  |  Slice: copy selected slice
- *   Shift+Copy    - Paste clipboard at cursor (insert)  |  Slice: paste overwrite into selected slice
- *   Remove        - Cut selection to clipboard (delete)  |  Slice: cut selected slice out of file
- *   Shift+Remove  - (Slice only) Paste clipboard insert before selected slice
+ *   Mute          - Mute (zero out) selection (all views)
+ *   Copy          - Copy selection  |  Slice: copy selected slice
+ *   Shift+Copy    - Paste at cursor (insert)  |  Slice: paste insert before selected slice
+ *   Remove        - Cut selection (copy + remove)  |  Slice: cut selected slice
  *   Shift+L/R     - Jump selection by one length  |  Slice: move selected slice left/right
+ *   Down          - (BPM) Read BPM from filename
+ *   Up            - (BPM) Estimate BPM from selection length
+ *   Step 15       - Set start marker at playback position (Trim/BPM)
+ *   Step 16       - Set end marker at playback position (Trim/BPM)
  *   Shift+Capture - Export selection to new file
  *   Capture       - Save (overwrite confirmation)
  *   Undo          - Undo last destructive operation
@@ -47,7 +50,7 @@ import {
     MoveStep1,
     MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4, MoveKnob5, MoveKnob6, MoveKnob7, MoveKnob8,
     MoveKnob5Touch, MoveKnob6Touch, MoveKnob7Touch, MoveKnob8Touch,
-    White, Black, DarkGrey, LightGrey, BrightRed, OrangeRed, Cyan,
+    White, Black, DarkGrey, LightGrey, BrightRed, OrangeRed, BrightGreen,
     WhiteLedOff, WhiteLedDim, WhiteLedMedium, WhiteLedBright
 } from '/data/UserData/move-anything/shared/constants.mjs';
 
@@ -479,12 +482,19 @@ function initLedsStep() {
 
     var commands = [];
 
-    /* Button LEDs — dim to show they're active */
-    commands.push(function() { setButtonLED(CC_MUTE, LED_DIM, true); });
-    commands.push(function() { setButtonLED(CC_CAPTURE, LED_DIM, true); });
-    commands.push(function() { setButtonLED(CC_UNDO, LED_DIM, true); });
-    commands.push(function() { setButtonLED(CC_LOOP, LED_DIM, true); });
-    commands.push(function() { setButtonLED(CC_BACK, LED_DIM, true); });
+    /* Button LEDs — init all to OFF, updateLeds() will set per-view state */
+    commands.push(function() { setButtonLED(CC_COPY, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_MUTE, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_DELETE, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_CAPTURE, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_SAMPLE, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_UNDO, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_LOOP, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_BACK, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_LEFT, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_RIGHT, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_UP, LED_OFF, true); });
+    commands.push(function() { setButtonLED(CC_DOWN, LED_OFF, true); });
 
     /* Step view-selector LEDs (Steps 1–3) — init to Black */
     for (var s = 0; s < 3; s++) {
@@ -492,6 +502,9 @@ function initLedsStep() {
             return function() { setLED(n, Black, true); };
         })(STEP_BASE + s));
     }
+    /* Step 15/16 marker-set LEDs — init to Black */
+    commands.push(function() { setLED(STEP_BASE + 14, Black, true); });
+    commands.push(function() { setLED(STEP_BASE + 15, Black, true); });
 
     /* Pad LEDs — force=true ensures hardware is in sync on reconnect */
     for (var p = PAD_NOTE_MIN; p <= PAD_NOTE_MAX; p++) {
@@ -518,12 +531,47 @@ function initLedsStep() {
  */
 function updateLeds() {
     if (ledInitPending) return; /* Don't send until init completes */
-    setButtonLED(CC_LOOP, loopEnabled ? LED_BRIGHT : LED_DIM);
-    setButtonLED(CC_UNDO, hasUndo ? LED_MED : LED_DIM);
+
+    var isTrim  = (currentView === VIEW_TRIM);
+    var isBpm   = (currentView === VIEW_BPM_TRIM);
+    var isSlice = (currentView === VIEW_SLICE);
+    var isLoop  = (currentView === VIEW_LOOP);
+    var isEdit  = isTrim || isBpm || isSlice || isLoop;
+
+    /* Buttons available in all edit views */
+    setButtonLED(CC_COPY,    isEdit  ? LED_DIM : LED_OFF);
+    setButtonLED(CC_MUTE,    isEdit  ? LED_DIM : LED_OFF);
+    setButtonLED(CC_BACK,    isEdit  ? LED_DIM : LED_OFF);
+    setButtonLED(CC_SAMPLE,  isEdit  ? LED_OFF : LED_OFF);
+
+    /* Remove: Trim, BPM, Slice, Loop */
+    setButtonLED(CC_DELETE,  isEdit  ? LED_DIM : LED_OFF);
+
+    /* Undo: stateful brightness */
+    setButtonLED(CC_UNDO,    isEdit  ? (hasUndo ? LED_MED : LED_DIM) : LED_OFF);
+
+    /* Loop: Trim, BPM, Loop (not Slice) */
+    setButtonLED(CC_LOOP,    (isTrim || isBpm || isLoop) ? (loopEnabled ? LED_BRIGHT : LED_DIM) : LED_OFF);
+
+    /* Capture: Trim, BPM, Slice (Shift+Capture = export) */
+    setButtonLED(CC_CAPTURE, (isTrim || isBpm || isSlice) ? LED_DIM : LED_OFF);
+
+    /* Left/Right: Trim, BPM, Slice */
+    setButtonLED(CC_LEFT,  (isTrim || isBpm || isSlice) ? LED_DIM : LED_OFF);
+    setButtonLED(CC_RIGHT, (isTrim || isBpm || isSlice) ? LED_DIM : LED_OFF);
+
+    /* Up/Down: BPM, Slice */
+    setButtonLED(CC_UP,   (isBpm || isSlice) ? LED_DIM : LED_OFF);
+    setButtonLED(CC_DOWN, (isBpm || isSlice) ? LED_DIM : LED_OFF);
+
     /* Step view-selector LEDs */
-    setLED(STEP_BASE + 0, currentView === VIEW_TRIM     ? White     : DarkGrey);
-    setLED(STEP_BASE + 1, currentView === VIEW_BPM_TRIM ? Cyan : DarkGrey);
-    setLED(STEP_BASE + 2, currentView === VIEW_SLICE    ? OrangeRed : DarkGrey);
+    setLED(STEP_BASE + 0, isTrim  ? White     : DarkGrey);
+    setLED(STEP_BASE + 1, isBpm   ? LightGrey : DarkGrey);
+    setLED(STEP_BASE + 2, isSlice ? OrangeRed : DarkGrey);
+
+    /* Step 15/16: marker-set LEDs (Trim/BPM only) */
+    setLED(STEP_BASE + 14, (isTrim || isBpm) ? BrightGreen : Black);
+    setLED(STEP_BASE + 15, (isTrim || isBpm) ? BrightRed   : Black);
 }
 
 /* ============ Helpers ============ */
@@ -3280,26 +3328,10 @@ function handleCC(cc, value) {
         return;
     }
 
-    /* Mute button — set marker at current playback position */
+    /* Mute button — zero out selection (all views) */
     if (cc === CC_MUTE && value > 0) {
-        if ((currentView === VIEW_TRIM || currentView === VIEW_BPM_TRIM) && playing) {
-            if (shiftHeld) {
-                /* Shift+Mute: set end marker at play position */
-                endSample = playPos;
-                if (endSample <= startSample) endSample = startSample + 1;
-                if (endSample > totalFrames) endSample = totalFrames;
-                syncMarkersToDs();
-                refreshWaveform();
-                showStatus("End → " + formatTime(endSample), 60);
-            } else {
-                /* Mute: set start marker at play position */
-                startSample = playPos;
-                if (startSample >= endSample) endSample = startSample + 1;
-                if (endSample > totalFrames) { endSample = totalFrames; startSample = endSample - 1; }
-                syncMarkersToDs();
-                refreshWaveform();
-                showStatus("Start → " + formatTime(startSample), 60);
-            }
+        if (currentView === VIEW_TRIM || currentView === VIEW_BPM_TRIM || currentView === VIEW_SLICE) {
+            doMute();
         } else if (currentView === VIEW_LOOP) {
             doMute();
             invalidateSeamWaveform();
@@ -3317,33 +3349,34 @@ function handleCC(cc, value) {
         return;
     }
 
-    /* Copy button: Trim/Loop = copy/paste; Slice = copy/paste-overwrite slice */
+    /* Copy button: copy (all views) / Shift+Copy: paste insert (all views) */
     if (cc === CC_COPY && value > 0) {
-        if (currentView === VIEW_TRIM || currentView === VIEW_LOOP) {
-            if (shiftHeld) {
+        if (shiftHeld) {
+            if (currentView === VIEW_SLICE) {
+                doSlicePasteInsert();
+            } else {
                 doPaste();
                 if (currentView === VIEW_LOOP) invalidateSeamWaveform();
+            }
+        } else {
+            if (currentView === VIEW_SLICE) {
+                doSliceCopy();
             } else {
                 doCopy();
-            }
-        } else if (currentView === VIEW_SLICE) {
-            if (shiftHeld) {
-                doSlicePasteOverwrite();
-            } else {
-                doSliceCopy();
             }
         }
         return;
     }
 
-    /* Remove (Delete) button: Slice = cut slice / paste-insert before slice */
+    /* Remove (Delete) button: cut (all views) */
     if (cc === CC_DELETE && value > 0) {
         if (currentView === VIEW_SLICE) {
-            if (shiftHeld) {
-                doSlicePasteInsert();
-            } else {
-                doSliceCut();
-            }
+            doSliceCut();
+        } else if (currentView === VIEW_TRIM || currentView === VIEW_BPM_TRIM) {
+            doCut();
+        } else if (currentView === VIEW_LOOP) {
+            doCut();
+            invalidateSeamWaveform();
         }
         return;
     }
@@ -3406,43 +3439,8 @@ function handleCC(cc, value) {
         return;
     }
 
-    /* Capture button — set start/end marker via BPM snapping in BPM view */
+    /* Capture button */
     if (cc === CC_CAPTURE && value > 0) {
-        if (currentView === VIEW_BPM_TRIM) {
-            if (shiftHeld) {
-                /* Shift+Capture: estimate BPM from selection */
-                var selLen = endSample - startSample;
-                if (selLen <= 0) { showStatus("Empty selection", 60); return; }
-                var div = BEAT_DIVISIONS[beatDivIndex];
-                var estimatedBpm = 960.0 / (selLen / sampleRate * div);
-                estimatedBpm = Math.round(estimatedBpm * 10) / 10;
-                if (estimatedBpm < 20 || estimatedBpm > 999) {
-                    showStatus("BPM out of range", 60); return;
-                }
-                bpm = estimatedBpm;
-                showStatus("BPM: " + bpm.toFixed(1), 90);
-            } else {
-                /* Capture: extract BPM from filename and snap end marker to beat grid */
-                var bpmMatch = fileName.match(/(\d+(?:\.\d+)?)\s*bpm/i);
-                if (bpmMatch) {
-                    var detectedBpm = parseFloat(bpmMatch[1]);
-                    if (detectedBpm >= 20 && detectedBpm <= 999) {
-                        bpm = Math.round(detectedBpm * 10) / 10;
-                        var beatStep = getBeatStepSamples();
-                        var beats = Math.max(1, Math.round((endSample - startSample) / beatStep));
-                        endSample = startSample + beats * beatStep;
-                        if (endSample > totalFrames) endSample = totalFrames;
-                        syncMarkersToDs();
-                        refreshWaveform();
-                        showStatus("BPM: " + bpm.toFixed(1), 90);
-                    } else {
-                        showStatus("BPM out of range", 60);
-                    }
-                } else {
-                    showStatus("No BPM in filename", 60);
-                }
-            }
-        }
         return;
     }
 
@@ -3567,8 +3565,44 @@ function handleCC(cc, value) {
         return;
     }
 
-    /* Up/Down arrows in slice mode */
+    /* Up/Down arrows */
     if ((cc === CC_UP || cc === CC_DOWN) && value > 0) {
+        if (currentView === VIEW_BPM_TRIM) {
+            if (cc === CC_DOWN) {
+                /* Down: read BPM from filename */
+                var bpmMatch = fileName.match(/(\d+(?:\.\d+)?)\s*bpm/i);
+                if (bpmMatch) {
+                    var detectedBpm = parseFloat(bpmMatch[1]);
+                    if (detectedBpm >= 20 && detectedBpm <= 999) {
+                        bpm = Math.round(detectedBpm * 10) / 10;
+                        var beatStep = getBeatStepSamples();
+                        var beats = Math.max(1, Math.round((endSample - startSample) / beatStep));
+                        endSample = startSample + beats * beatStep;
+                        if (endSample > totalFrames) endSample = totalFrames;
+                        syncMarkersToDs();
+                        refreshWaveform();
+                        showStatus("BPM: " + bpm.toFixed(1), 90);
+                    } else {
+                        showStatus("BPM out of range", 60);
+                    }
+                } else {
+                    showStatus("No BPM in filename", 60);
+                }
+            } else {
+                /* Up: estimate BPM from selection length */
+                var selLen = endSample - startSample;
+                if (selLen <= 0) { showStatus("Empty selection", 60); return; }
+                var div = BEAT_DIVISIONS[beatDivIndex];
+                var estimatedBpm = 960.0 / (selLen / sampleRate * div);
+                estimatedBpm = Math.round(estimatedBpm * 10) / 10;
+                if (estimatedBpm < 20 || estimatedBpm > 999) {
+                    showStatus("BPM out of range", 60); return;
+                }
+                bpm = estimatedBpm;
+                showStatus("BPM: " + bpm.toFixed(1), 90);
+            }
+            return;
+        }
         if (currentView === VIEW_SLICE) {
             if (shiftHeld && sliceCount > 32) {
                 /* Shift+Up/Down: pad bank scrolling (>32 slices) */
@@ -4151,6 +4185,30 @@ function handleNote(note, velocity) {
             statusTimer = 0;
             statusMsg = "";
         }
+    }
+
+    /* Step 15/16: set start/end marker at playback position */
+    if (velocity > 0 && (note === STEP_BASE + 14 || note === STEP_BASE + 15)) {
+        if ((currentView === VIEW_TRIM || currentView === VIEW_BPM_TRIM) && playing) {
+            if (note === STEP_BASE + 14) {
+                /* Step 15: set start marker at play position */
+                startSample = playPos;
+                if (startSample >= endSample) endSample = startSample + 1;
+                if (endSample > totalFrames) { endSample = totalFrames; startSample = endSample - 1; }
+                syncMarkersToDs();
+                refreshWaveform();
+                showStatus("Start \u2192 " + formatTime(startSample), 60);
+            } else {
+                /* Step 16: set end marker at play position */
+                endSample = playPos;
+                if (endSample <= startSample) endSample = startSample + 1;
+                if (endSample > totalFrames) endSample = totalFrames;
+                syncMarkersToDs();
+                refreshWaveform();
+                showStatus("End \u2192 " + formatTime(endSample), 60);
+            }
+        }
+        return;
     }
 
     /* Step 1–3: view switcher (VIEW_TRIM / VIEW_BPM_TRIM / VIEW_SLICE) */

@@ -64,13 +64,14 @@ cd move-anything-waveform-editor
 | Knob 7 (touch+twist) | Toggle loop mode on/off |
 | Knob 8 (touch+twist) | Snap markers to zero crossing |
 | Any pad | Hold to audition (Shift: preview near end) |
-| Mute | Set start marker at playback position (while playing) |
-| Shift+Mute | Set end marker at playback position (while playing) |
+| Mute | Mute (zero out) selection |
 | Copy | Copy selection |
 | Shift+Copy | Paste at cursor (insert) |
 | Remove | Cut selection (copy + remove) |
 | Left/Right | Nudge selection by coarse step |
 | Shift+L/R | Jump selection by one selection length |
+| Step 15 | Set start marker at playback position (while playing) |
+| Step 16 | Set end marker at playback position (while playing) |
 | Loop | Enter loop view (seam editor) |
 | Shift+Loop | Toggle loop mode on/off |
 | Sample | Open save menu (editable filename) |
@@ -90,10 +91,14 @@ cd move-anything-waveform-editor
 | Knob 3 | Zoom |
 | Knob 5 | Set BPM (Shift: fine ±0.1) — snaps end marker to beat grid |
 | Knob 6 | Set beat division (1/1–1/16) |
-| Copy | Read BPM from filename |
-| Shift+Copy | Estimate BPM from selection length (assumes 1 bar, 4/4) |
+| Copy | Copy selection |
+| Shift+Copy | Paste at cursor (insert) |
+| Down | Read BPM from filename |
+| Up | Estimate BPM from selection length (assumes 1 bar, 4/4) |
 | Left/Right | Move active marker by one division |
 | Shift+L/R | Move entire selection by one division |
+| Step 15 | Set start marker at playback position (while playing) |
+| Step 16 | Set end marker at playback position (while playing) |
 | Shift+Loop | Toggle loop on/off |
 | Back | Return to Trim view |
 
@@ -115,9 +120,8 @@ cd move-anything-waveform-editor
 | Down | Split slice at midpoint |
 | Shift+Up/Down | Scroll pad bank (when >32 slices) |
 | Copy | Copy selected slice to clipboard |
-| Shift+Copy | Paste clipboard overwrite into selected slice |
+| Shift+Copy | Paste clipboard insert before selected slice |
 | Remove | Cut selected slice (copy + remove from file) |
-| Shift+Remove | Paste clipboard insert before selected slice |
 | Pads | Audition slice (hold) |
 | Sample | Save slices / Drum Preset / REX Loop (if installed) |
 | Shift+Capture | Export current selection to new file |
