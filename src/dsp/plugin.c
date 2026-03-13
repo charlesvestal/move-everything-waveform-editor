@@ -1205,6 +1205,86 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         return;
     }
 
+    if (strcmp(key, "fade_in") == 0) {
+        /* Linear fade-in over selection */
+        if (!inst->audio_data || inst->audio_frames <= 0) return;
+
+        int start = inst->start_sample;
+        int end   = inst->end_sample;
+        if (start < 0) start = 0;
+        if (end > inst->audio_frames) end = inst->audio_frames;
+        if (start >= end) {
+            plugin_log("Fade in: invalid selection");
+            return;
+        }
+
+        save_undo(inst);
+
+        int len = end - start;
+        for (int i = 0; i < len; i++) {
+            float gain = (float)i / (float)len;
+            int idx = (start + i) * SAMPLES_PER_FRAME;
+            for (int ch = 0; ch < SAMPLES_PER_FRAME; ch++) {
+                float s = (float)inst->audio_data[idx + ch] * gain;
+                if (s > 32767.0f) s = 32767.0f;
+                if (s < -32768.0f) s = -32768.0f;
+                inst->audio_data[idx + ch] = (int16_t)s;
+            }
+        }
+
+        inst->dirty = 1;
+        compute_waveform(inst, 128);
+        inst->peak_db = compute_peak_db(inst->audio_data, inst->audio_frames);
+
+        {
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf),
+                     "Fade in %d-%d (%d frames)", start, end, len);
+            plugin_log(log_buf);
+        }
+        return;
+    }
+
+    if (strcmp(key, "fade_out") == 0) {
+        /* Linear fade-out over selection */
+        if (!inst->audio_data || inst->audio_frames <= 0) return;
+
+        int start = inst->start_sample;
+        int end   = inst->end_sample;
+        if (start < 0) start = 0;
+        if (end > inst->audio_frames) end = inst->audio_frames;
+        if (start >= end) {
+            plugin_log("Fade out: invalid selection");
+            return;
+        }
+
+        save_undo(inst);
+
+        int len = end - start;
+        for (int i = 0; i < len; i++) {
+            float gain = 1.0f - (float)i / (float)len;
+            int idx = (start + i) * SAMPLES_PER_FRAME;
+            for (int ch = 0; ch < SAMPLES_PER_FRAME; ch++) {
+                float s = (float)inst->audio_data[idx + ch] * gain;
+                if (s > 32767.0f) s = 32767.0f;
+                if (s < -32768.0f) s = -32768.0f;
+                inst->audio_data[idx + ch] = (int16_t)s;
+            }
+        }
+
+        inst->dirty = 1;
+        compute_waveform(inst, 128);
+        inst->peak_db = compute_peak_db(inst->audio_data, inst->audio_frames);
+
+        {
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf),
+                     "Fade out %d-%d (%d frames)", start, end, len);
+            plugin_log(log_buf);
+        }
+        return;
+    }
+
     if (strcmp(key, "cut") == 0) {
         /* Cut selection to clipboard (copy + remove) */
         if (!inst->audio_data || inst->audio_frames <= 0) return;

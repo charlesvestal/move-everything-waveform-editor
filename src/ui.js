@@ -50,7 +50,7 @@ import {
     MoveStep1,
     MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4, MoveKnob5, MoveKnob6, MoveKnob7, MoveKnob8,
     MoveKnob5Touch, MoveKnob6Touch, MoveKnob7Touch, MoveKnob8Touch,
-    White, Black, DarkGrey, LightGrey, BrightRed, OrangeRed, BrightGreen,
+    White, Black, DarkGrey, LightGrey, BrightRed, OrangeRed, BrightGreen, VividYellow, Blue,
     WhiteLedOff, WhiteLedDim, WhiteLedMedium, WhiteLedBright
 } from '/data/UserData/move-anything/shared/constants.mjs';
 
@@ -568,6 +568,11 @@ function updateLeds() {
     setLED(STEP_BASE + 0, isTrim  ? White     : DarkGrey);
     setLED(STEP_BASE + 1, isBpm   ? LightGrey : DarkGrey);
     setLED(STEP_BASE + 2, isSlice ? OrangeRed : DarkGrey);
+
+    /* Step 9/10: fade in/out LEDs (Trim/BPM/Slice) */
+    var hasFade = isTrim || isBpm || isSlice;
+    setLED(STEP_BASE + 8,  hasFade ? VividYellow : Black);
+    setLED(STEP_BASE + 9,  hasFade ? Blue   : Black);
 
     /* Step 15/16: marker-set LEDs (Trim/BPM), shuffle LED (Slice) */
     setLED(STEP_BASE + 14, (isTrim || isBpm) ? BrightGreen : Black);
@@ -2458,6 +2463,24 @@ function doMute() {
     updateLeds();
 }
 
+function doFadeIn() {
+    syncMarkersToDs();
+    host_module_set_param("fade_in", "1");
+    showStatus("Fade in", 60);
+    refreshFileInfo();
+    refreshState();
+    invalidateWaveform();
+}
+
+function doFadeOut() {
+    syncMarkersToDs();
+    host_module_set_param("fade_out", "1");
+    showStatus("Fade out", 60);
+    refreshFileInfo();
+    refreshState();
+    invalidateWaveform();
+}
+
 /**
  * Cut selection to clipboard (copy + remove).
  */
@@ -4235,6 +4258,18 @@ function handleNote(note, velocity) {
             pendingTwistAction = null;
             statusTimer = 0;
             statusMsg = "";
+        }
+    }
+
+    /* Step 9/10: fade in/out (Trim/BPM/Slice) */
+    if (velocity > 0 && (note === STEP_BASE + 8 || note === STEP_BASE + 9)) {
+        if (currentView === VIEW_TRIM || currentView === VIEW_BPM_TRIM || currentView === VIEW_SLICE) {
+            if (note === STEP_BASE + 8) {
+                doFadeIn();
+            } else {
+                doFadeOut();
+            }
+            return;
         }
     }
 

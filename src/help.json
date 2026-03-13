@@ -55,6 +55,8 @@
         "  Shift: normalize",
         "",
         "Mute: zero out selection",
+        "Step 9: fade in selection",
+        "Step 10: fade out selection",
         "Step 15: set start",
         "  marker at playback",
         "  position",

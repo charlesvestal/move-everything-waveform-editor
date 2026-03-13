@@ -65,6 +65,8 @@ cd move-anything-waveform-editor
 | Knob 8 (touch+twist) | Snap markers to zero crossing |
 | Any pad | Hold to audition (Shift: preview near end) |
 | Mute | Mute (zero out) selection |
+| Step 9 | Fade in selection |
+| Step 10 | Fade out selection |
 | Copy | Copy selection |
 | Shift+Copy | Paste at cursor (insert) |
 | Remove | Cut selection (copy + remove) |
@@ -122,6 +124,8 @@ cd move-anything-waveform-editor
 | Copy | Copy selected slice to clipboard |
 | Shift+Copy | Paste clipboard insert before selected slice |
 | Remove | Cut selected slice (copy + remove from file) |
+| Step 9 | Fade in selected slice |
+| Step 10 | Fade out selected slice |
 | Step 16 | Shuffle all slices randomly |
 | Pads | Audition slice (hold) |
 | Sample | Save slices / Drum Preset / REX Loop (if installed) |
